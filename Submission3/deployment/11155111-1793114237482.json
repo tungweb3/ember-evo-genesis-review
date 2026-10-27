@@ -1,0 +1,78 @@
+{
+ "chainId": 11155111,
+ "owner": "0x5cF561D7EEB76dBd688127893Bb362C9A819f66D",
+ "contract": "0x0FB5B6E5c1B026c611900a864755faC86dAd4085",
+ "token": "0x100d91C5a704d383bDd8a0234B443D4eA893bb5e",
+ "tokenIsTestEmbeo": false,
+ "signer": "0x53db73f70385AeB3BcbD3173e2f6f94E45105C6d",
+ "snapshotRoot": "0xe5d638e061535acb3c52ab3748925ad1185cbb2759530c8b5b50eec361d76626",
+ "eligible": 2,
+ "freeStartAt": 1793114772,
+ "startBlock": 12005964,
+ "pendingURI": "ipfs://REHEARSAL/pending.json",
+ "metadataBase": "ipfs://REHEARSAL/looks/",
+ "revealCommit": "0x4c48feb11f81176cdda8114652c4749ca7caeb0474fec7b8ac039d63b42e9fc7",
+ "paidCost": "400000000000000000000000",
+ "goldCost": "1200",
+ "symbol": "tEEVO",
+ "paidRoute": "open (approvePaidPrice called; test price)",
+ "codeHash": "0xa54bede76104157ccc57079167105d2312ddd7de7267a32f8e9ebd82db4932db",
+ "steps": [
+  {
+   "name": "deploy EmberEvoGenesis",
+   "hash": "0xaf4d6c01c88b6b196b0459b4085750eb60d3c707c616713e52181e07bb40dfa1",
+   "gasUsed": "38601598"
+  },
+  {
+   "name": "configureSnapshot",
+   "hash": "0x3426c3ec22ba7b00a21fc316202ac236f76627bb04e21026eee9ee3a7b213192",
+   "gasUsed": "256743"
+  },
+  {
+   "name": "setRevealURIs (locked)",
+   "hash": "0xdc85e7bbe9b5ea5854762221cef229a877086bf52ccb0177877be4ecf856e518",
+   "gasUsed": "357077"
+  },
+  {
+   "name": "setRevealCommit",
+   "hash": "0x0d781e715e08a6f47d12ca322899f8940827c190ab6c3ebea2f597ae002cde30",
+   "gasUsed": "149483"
+  },
+  {
+   "name": "setMintPaused(false)",
+   "hash": "0x17a6aa30085aa0b7ac620efac56e3a4f795f567db4ea3c83973bae625f5f5c08",
+   "gasUsed": "37328"
+  },
+  {
+   "name": "approvePaidPrice",
+   "hash": "0x8b132b14153a69019fb53fd230f70a75db7028f04bae219b8c672020ae55475b",
+   "gasUsed": "31596"
+  }
+ ],
+ "etherscan": {
+  "contractName": "contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate",
+  "compiler": "v0.8.38+commit.1835d247",
+  "constructorArgsHex": "0000000000000000000000005cf561d7eeb76dbd688127893bb362c9a819f66d000000000000000000000000100d91c5a704d383bdd8a0234b443d4ea893bb5e00000000000000000000000053db73f70385aeb3bcbd3173e2f6f94e45105c6d0000000000000000000000000000000000000000000054b40b1f852bda00000000000000000000000000000000000000000000000000000000000000000004b000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000005744545564f000000000000000000000000000000000000000000000000000000",
+  "tokenConstructorArgsHex": null
+ },
+ "totalGas": "39433825",
+ "followUp": {
+  "workerVars": {
+   "CHAIN_ID": "11155111",
+   "CONTRACT_ADDRESS": "0x0FB5B6E5c1B026c611900a864755faC86dAd4085",
+   "METADATA_BASE": "ipfs://REHEARSAL/looks/"
+  },
+  "pageConfig": "window.GENESIS_CONFIG={\"chainId\":11155111,\"chainName\":\"Sepolia (test network)\",\"contract\":\"0x0FB5B6E5c1B026c611900a864755faC86dAd4085\",\"signerApi\":\"<signer worker URL>\",\"explorer\":\"https://sepolia.etherscan.io\",\"paid\":true};",
+  "goldBookRegistry": {
+   "id": "sepolia-r5-rehearsal-1",
+   "environment": "sepolia",
+   "chainId": 11155111,
+   "contract": "0x0fb5b6e5c1b026c611900a864755fac86dad4085",
+   "codeHash": "0xa54bede76104157ccc57079167105d2312ddd7de7267a32f8e9ebd82db4932db",
+   "deployBlock": "12005964",
+   "embeoCost": "400000000000000000000000",
+   "goldCost": "1200",
+   "signer": "0x53db73f70385AeB3BcbD3173e2f6f94E45105C6d"
+  }
+ }
+}

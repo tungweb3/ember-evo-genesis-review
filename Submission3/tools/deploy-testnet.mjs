@@ -1,0 +1,93 @@
+// Sepolia rehearsal deployment for Genesis R5. Refuses mainnet (the contract refuses it too).
+//   Dry run on a simulated Sepolia chain (chainId 11155111, in memory):  node contract/tools/deploy-testnet.mjs --dry-run
+//   Real Sepolia (the owner runs this with their own env; nothing is read from files except the snapshot list):
+//     RPC_URL, DEPLOYER_PRIVATE_KEY, SIGNER_ADDRESS, SNAPSHOT_FILE (JSON array of wallets), PENDING_URI, METADATA_BASE,
+//     REVEAL_COMMIT (the signer's reveal chain anchor, bytes32), SIGNER_KEY_FILE (the approval signer's key file: it signs
+//     the contract's RevealCommitAcceptance in this process, audit 2026-10-27; the key is never printed or written)
+//     optional: PAID_COST_EMBEO (whole tokens, default 400000), GOLD_COST (default 1200), SYMBOL (default tEEVO),
+//               EMBEO_ADDRESS (else a TestEmbeo is deployed), START_DELAY_SECONDS (default 600),
+//               OPEN_PAID=1 (also call approvePaidPrice: the paid rehearsal), EMBEO_RECIPIENTS (comma list: 1,000,000 tEMBEO each)
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {resolve} from 'node:path';
+import {ethers,createTestProvider,testAuthority} from './runtime.mjs';
+import {snapshotTree} from '../../signer/free-approval.mjs';
+import {revealChain,signRevealCommit} from '../../signer/reveal-chain.mjs';
+
+const artifacts=JSON.parse(readFileSync(new URL('../artifacts/test-artifacts.private.json',import.meta.url),'utf8'));
+export const GENESIS='contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate',EMBEO='contracts/testnet/TestEmbeo.sol:TestEmbeo';
+export const SEPOLIA=11155111;
+
+export async function deployRehearsal({deployer,signerAddress,revealSigner,snapshotWallets,pendingURI,metadataBase,revealCommit,paidCost,goldCost=1n,symbol='tEEVO',startDelay=600,embeoAddress=null,openPaid=false,embeoRecipients=[],log=()=>{}}){
+ const provider=deployer.provider,{chainId}=await provider.getNetwork();
+ if(chainId===1n)throw Error('MAINNET_REFUSED');
+ if(!ethers.isAddress(signerAddress))throw Error('SIGNER_ADDRESS_INVALID');
+ // the signer's reveal chain anchor (signer/tools/reveal-anchor.mjs prints it; the seed itself never comes here)
+ if(!/^0x[0-9a-fA-F]{64}$/.test(revealCommit??'')||BigInt(revealCommit)===0n)throw Error('REVEAL_COMMIT_INVALID');
+ // the approval signer accepts the commitment (the contract refuses one the owner sets alone)
+ if(!revealSigner||ethers.getAddress(await revealSigner.getAddress())!==ethers.getAddress(signerAddress))throw Error('REVEAL_SIGNER_MISMATCH');
+ if(!/^(ipfs|ar|https):\/\/\S+\/$/.test(metadataBase)||!/^(ipfs|ar|https):\/\/\S+$/.test(pendingURI))throw Error('METADATA_URI_INVALID');
+ if(!Number.isSafeInteger(startDelay)||startDelay<60)throw Error('START_DELAY_INVALID');
+ if(embeoRecipients.some(a=>!ethers.isAddress(a))||(embeoRecipients.length&&embeoAddress))throw Error('EMBEO_RECIPIENTS_INVALID');
+ const tree=snapshotTree(snapshotWallets),owner=await deployer.getAddress(),steps=[];
+ const record=async(name,tx)=>{const rc=await tx.wait();steps.push({name,hash:tx.hash,gasUsed:rc.gasUsed.toString()});log(name,tx.hash);return rc;};
+ async function deploy(key,args,name){const c=await new ethers.ContractFactory(artifacts[key].abi,artifacts[key].bytecode,deployer).deploy(...args);await record(name,c.deploymentTransaction());return c;}
+ const token=embeoAddress??await (await deploy(EMBEO,[owner],'deploy TestEmbeo')).getAddress();
+ const genesisArgs=[owner,token,signerAddress,paidCost,goldCost,symbol];
+ const genesis=await deploy(GENESIS,genesisArgs,'deploy EmberEvoGenesis');
+ const now=(await provider.getBlock('latest')).timestamp,freeStartAt=now+startDelay;
+ await record('configureSnapshot',await genesis.configureSnapshot(tree.root,tree.count,now-1,freeStartAt));
+ await record('setRevealURIs (locked)',await genesis.setRevealURIs(pendingURI,metadataBase,true));
+ const commitDeadline=(await provider.getBlock('latest')).timestamp+3600;
+ const acceptance=await signRevealCommit({signer:revealSigner,chainId,contractAddress:await genesis.getAddress(),commit:revealCommit,previous:await genesis.revealCommit(),signerEpoch:await genesis.signerEpoch(),deadline:commitDeadline});
+ await record('setRevealCommit',await genesis.setRevealCommit(revealCommit,commitDeadline,acceptance));
+ await record('setMintPaused(false)',await genesis.setMintPaused(false));
+ // Paid rehearsal: open the route at the deploy-time (test) price, and hand test EMBEO to the test wallets.
+ if(openPaid)await record('approvePaidPrice',await genesis.approvePaidPrice());
+ if(embeoRecipients.length){const t=new ethers.Contract(token,artifacts[EMBEO].abi,deployer);
+  for(const to of embeoRecipients)await record('tEMBEO 1,000,000 -> '+to,await t.transfer(to,1_000_000n*10n**18n));}
+ const contract=await genesis.getAddress();
+ const codeHash=ethers.keccak256(await provider.getCode(contract));
+ return {chainId:Number(chainId),owner,contract,token,tokenIsTestEmbeo:!embeoAddress,signer:signerAddress,snapshotRoot:tree.root,eligible:tree.count,
+  freeStartAt,startBlock:Number(await genesis.startBlock()),pendingURI,metadataBase,revealCommit,paidCost:paidCost.toString(),goldCost:goldCost.toString(),symbol,
+  paidRoute:openPaid?'open (approvePaidPrice called; test price)':'closed (approvePaidPrice not called)',codeHash,steps,
+  // for Etherscan "Verify & Publish" (Solidity standard JSON input = contract/artifacts/standard-input.private.json)
+  etherscan:{contractName:GENESIS,compiler:'v0.8.38+commit.1835d247',constructorArgsHex:genesis.interface.encodeDeploy(genesisArgs).slice(2),
+   tokenConstructorArgsHex:embeoAddress?null:ethers.AbiCoder.defaultAbiCoder().encode(['address'],[owner]).slice(2)},
+  totalGas:steps.reduce((a,s)=>a+BigInt(s.gasUsed),0n).toString()};
+}
+
+/** What the signer Worker and the mint page need from a deployment. */
+export function followUp(d){
+ return {workerVars:{CHAIN_ID:String(d.chainId),CONTRACT_ADDRESS:d.contract,METADATA_BASE:d.metadataBase},
+  pageConfig:`window.GENESIS_CONFIG=${JSON.stringify({chainId:d.chainId,chainName:'Sepolia (test network)',contract:d.contract,signerApi:'<signer worker URL>',explorer:'https://sepolia.etherscan.io',paid:d.paidRoute.startsWith('open')})};`,
+  // World repo server/genesis-deployments-sepolia.ts entry (the GOLD book only accepts orders for pinned deployments)
+  goldBookRegistry:{id:'sepolia-r5-rehearsal-1',environment:'sepolia',chainId:d.chainId,contract:d.contract.toLowerCase(),codeHash:d.codeHash,
+   deployBlock:String(d.startBlock),embeoCost:d.paidCost,goldCost:d.goldCost,signer:d.signer}};
+}
+
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+ const dry=process.argv.includes('--dry-run');
+ let deployer,close=()=>{},args;
+ if(dry){
+  const rpc=await createTestProvider(SEPOLIA),provider=new ethers.BrowserProvider(rpc,undefined,{cacheTimeout:-1});
+  deployer=await provider.getSigner(0);close=()=>rpc.disconnect();
+  args={signerAddress:testAuthority(1).address,revealSigner:testAuthority(1),snapshotWallets:[await (await provider.getSigner(1)).getAddress(),await (await provider.getSigner(2)).getAddress()],
+   pendingURI:'ipfs://REHEARSAL/pending.json',metadataBase:'ipfs://REHEARSAL/looks/',revealCommit:revealChain(ethers.keccak256(ethers.toUtf8Bytes('ember-evo-genesis DRY RUN reveal chain'))).anchor,paidCost:400000n*10n**18n,goldCost:1200n,openPaid:true,embeoRecipients:[await (await provider.getSigner(2)).getAddress()]};
+ }else{
+  const need=k=>{const v=process.env[k];if(!v)throw Error('missing env '+k);return v;};
+  const provider=new ethers.JsonRpcProvider(need('RPC_URL'));
+  if((await provider.getNetwork()).chainId!==BigInt(SEPOLIA))throw Error('RPC_URL is not Sepolia');
+  deployer=new ethers.Wallet(need('DEPLOYER_PRIVATE_KEY'),provider);
+  args={signerAddress:need('SIGNER_ADDRESS'),revealSigner:new ethers.Wallet(readFileSync(need('SIGNER_KEY_FILE'),'utf8').trim()),snapshotWallets:JSON.parse(readFileSync(need('SNAPSHOT_FILE'),'utf8')),pendingURI:need('PENDING_URI'),
+   metadataBase:need('METADATA_BASE'),revealCommit:need('REVEAL_COMMIT'),paidCost:BigInt(process.env.PAID_COST_EMBEO??'400000')*10n**18n,goldCost:BigInt(process.env.GOLD_COST??'1200'),
+   symbol:process.env.SYMBOL??'tEEVO',embeoAddress:process.env.EMBEO_ADDRESS||null,startDelay:Number(process.env.START_DELAY_SECONDS??600),
+   openPaid:process.env.OPEN_PAID==='1',embeoRecipients:(process.env.EMBEO_RECIPIENTS??'').split(',').map(s=>s.trim()).filter(Boolean)};
+ }
+ try{
+  const d=await deployRehearsal({deployer,...args,log:(n,h)=>console.log('  ',n,h)});
+  const file=fileURLToPath(new URL(`../deployments/${dry?'dryrun-':''}${d.chainId}-${Date.now()}.json`,import.meta.url));
+  mkdirSync(resolve(file,'..'),{recursive:true});writeFileSync(file,JSON.stringify({...d,followUp:followUp(d)},null,1));
+  console.log(JSON.stringify({contract:d.contract,token:d.token,eligible:d.eligible,totalGas:d.totalGas,file},null,1));
+ }finally{close();}
+}
