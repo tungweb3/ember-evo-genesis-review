@@ -1,6 +1,8 @@
 # Submission 4 findings → Submission 5
 
-Audit job: explorer.imd.fun b0b1d96a (code at commit b14f07d; 2 low, 1 info). "Fixed" means the code changed and the
+Audit job: explorer.imd.fun b0b1d96a (code at commit b14f07d; 2 low, 1 info). The report itself is attached unchanged
+as [AUDIT_REPORT_b0b1d96a.md](AUDIT_REPORT_b0b1d96a.md) (from https://api.imd.fun/jobs/b0b1d96a-bd57-44c7-a43c-8b7d123b9bb2/report.md,
+SHA-256 `d8f3f61f9ff31b48bb908b7226085e09f5be653861bf22379e571b2429d183d7`). "Fixed" means the code changed and the
 named test, written from the finding's reproduction, passes on Submission 5. The Foundry proof for finding 1 was ported
 to the project's own Hardhat EDR harness; it was not run as a Foundry test.
 

@@ -6,7 +6,8 @@ Ember Evo Genesis is an **unofficial, community-made** NFT collection (1,688 3D 
 (explorer.imd.fun job b0b1d96a: a reveal-commitment acceptance now signs a recent block instead of a deadline; the
 withholding trust model restated; a stricter GOLD-book check).** Read [Submission5/AUDIT_README.md](Submission5/AUDIT_README.md)
 first, then [Submission5/FINDINGS_RESPONSE.md](Submission5/FINDINGS_RESPONSE.md) (each Submission 4 finding, what
-changed, which test covers it).
+changed, which test covers it). The fourth audit's report is attached unchanged:
+[Submission5/AUDIT_REPORT_b0b1d96a.md](Submission5/AUDIT_REPORT_b0b1d96a.md) (2 low, 1 info; all three handled in Submission 5).
 
 - Primary scope: [`Submission5/contracts/EmberEvoGenesisCandidate.sol`](Submission5/contracts/EmberEvoGenesisCandidate.sol)
   (ERC-721, OpenZeppelin 5.4.0, solc 0.8.38, viaIR, optimizer 200, EVM cancun).

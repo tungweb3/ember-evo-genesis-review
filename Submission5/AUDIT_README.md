@@ -4,7 +4,8 @@ Ember Evo Genesis is an **unofficial, community-made** NFT collection (1,688 3D 
 look (body + clothes + accessories) chosen by the minter, plus a skin colour that is either chosen or revealed later at
 random. This is the **fifth pre-audit** of the release candidate. It answers the fourth audit
 (Submission 4, explorer.imd.fun job b0b1d96a: 2 low, 1 info). The per-finding answers, with the test that
-reproduces each one, are in [FINDINGS_RESPONSE.md](FINDINGS_RESPONSE.md).
+reproduces each one, are in [FINDINGS_RESPONSE.md](FINDINGS_RESPONSE.md); the report itself is attached unchanged as
+[AUDIT_REPORT_b0b1d96a.md](AUDIT_REPORT_b0b1d96a.md).
 
 The changes are narrow:
 - **A reveal-commitment acceptance signs a recent block's number and hash instead of a deadline** (finding 1). It cannot
