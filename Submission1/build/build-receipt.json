@@ -1,0 +1,181 @@
+{
+  "scope": "LOCAL TEST PROBE ONLY; no issuance or production Genesis",
+  "runtime": {
+    "node": "v24.22.1",
+    "executable": "C:\\Program Files\\nodejs\\node.exe",
+    "executableSha256": "d702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5",
+    "dependencyRoot": "C:\\Users\\A\\Desktop\\Claude\\Stickember\\genesis-mint\\v0.5\\imd-genesis-mint",
+    "packages": {
+      "solc": {
+        "version": "0.8.37",
+        "packageSha256": "b3a90035cab4e8aa43068f33f01497dccfb77b294e1ea30c5fb32a9631e33491"
+      },
+      "ethers": {
+        "version": "6.15.0",
+        "packageSha256": "957d5092241ed59860532077633008c49852b98b384493bb0f04225a414eb601"
+      },
+      "@openzeppelin/contracts": {
+        "version": "5.4.0",
+        "packageSha256": "8c5b490fe133a9dda13c9a2915761c6b6c2e003a16c95863a800ce5527992bc4"
+      }
+    },
+    "entries": {
+      "solc": {
+        "path": "D:\\A\\Desktop\\Claude\\Stickember\\genesis-mint\\r5-six-skin\\workspace\\genesis-local-integration-2026-10-13\\.rd\\compiler-runtime-0.8.38\\soljson-verified.cjs",
+        "sha256": "6c74ffba0ea4cf9521e78b16052a98208770bb7677616de08ced239f4312d390"
+      },
+      "ethers": {
+        "path": "C:\\Users\\A\\Desktop\\Claude\\Stickember\\genesis-mint\\v0.5\\imd-genesis-mint\\node_modules\\ethers\\lib.commonjs\\index.js",
+        "sha256": "17771082edebd848a7e261149bbbbe3221e58825517dc79255a4b9376f21ad82"
+      }
+    },
+    "compiler": "0.8.38+commit.1835d247.Emscripten.clang",
+    "compilerPayloadSha256": "6c74ffba0ea4cf9521e78b16052a98208770bb7677616de08ced239f4312d390",
+    "dependencyLockSha256": "ea306a10fe0b2d0b044405e72d7d63b89ca96e616fb97e2b8a11f2bb736c2b15",
+    "evmVersion": "cancun",
+    "backend": "Hardhat EDR in-process",
+    "evmPackages": {
+      "hardhat": {
+        "version": "3.19.0",
+        "packageSha256": "2919dd82c13cefefb7323093a22fe9881a67ea7d2a37e4ddf48b4b08237dd618"
+      },
+      "@nomicfoundation/edr": {
+        "version": "0.22.2",
+        "packageSha256": "52af7446b33e6ea1ed617b7c10d7b38b03f12963c9cb7fa343cb082e5ad4bcec"
+      },
+      "@nomicfoundation/edr-win32-x64-msvc": {
+        "version": "0.22.2",
+        "packageSha256": "6642154cdeb72c1dae00e287173cef8f88d72330b0b54b9199dfae095db471e4"
+      }
+    },
+    "evmLockSha256": "2fc7231540366c4bb6c0c2bde040d089205edb7879945488f36b2ef16857306c",
+    "hreEntrySha256": "4e7b6df09756b061c531cb422ad3d0bbf06355df9b8a2736ba1dde63fca0758b",
+    "nativePayloadSha256": "03c724f964919d21371ff8a62d371e8c7228862b79dba968e6de78f43e4d7ab1",
+    "localOnly": true,
+    "limitations": [
+      "Synthetic EDR Cancun; no public RPC, mainnet fork, real Safe or verified EMBEO measurement",
+      "R1 historical Shanghai and new Cancun results are recorded separately"
+    ],
+    "compilerOrigin": "https://binaries.soliditylang.org/bin/soljson-v0.8.38+commit.1835d247.js",
+    "compilerLockSha256": "0d11983ee674460c0a366fd4b66f013a5878ad0b730bf6a13fe76da4426a9c12"
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "viaIR": true,
+    "evmVersion": "cancun",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "metadata",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  },
+  "standardInputSha256": "9cfa6afb6a0476ae2cdbaa20f4fe6680be9d53dd11c77ffbe78818b485c0ffdc",
+  "sourceSha256": {
+    "contracts/EmberEvoGenesisCandidate.sol": "c5c28e6b963b876485bd66aad520d05b1dedb9cc72a4c059ef7bec15c6eb5bbe",
+    "contracts/test/Fixtures.sol": "c054320956a975351fdffe9ad5aa01834233c22ab0e7baa9d73eabda8c6d2d87",
+    "contracts/test/HardeningFixtures.sol": "4b05e2b5753829a2108606ac81a02254a81309cc94b6d7b65d16d9f135b09f67",
+    "contracts/test/R3Fixtures.sol": "96e6b3a38f56ba1fdaaa72a3462490bf4bdd3347fef1086fda3360b5f951c14d",
+    "contracts/testnet/TestEmbeo.sol": "8c170392f8cb63d39bf3a64d13edbd0e40f633fb428fc09d137a7bd7a58c7f65",
+    "@openzeppelin/contracts/token/ERC721/ERC721.sol": "330a87f2bf94083df8ddd341735d712866455042aaca58d33ee1799773e1cae1",
+    "@openzeppelin/contracts/token/ERC20/IERC20.sol": "01b6f5c4fa45fd38822b286ecef6daf983d27306dd6362496fa71b3e4600b72c",
+    "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol": "0b7132f17d14d1d84b41b0bb429be62dafdff00fd3470f68724d8018eb07f57a",
+    "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol": "ac1fd9fa99b194a8db8dfa9ae8e3ff44feaa8f16668241fd2b66ae8b47d7c082",
+    "@openzeppelin/contracts/access/Ownable.sol": "38578bd71c0a909840e67202db527cc6b4e6b437e0f39f0c909da32c1e30cb81",
+    "@openzeppelin/contracts/access/Ownable2Step.sol": "c75345d7b9feef17ae29f2a800ca2f65f8021cf80436a41d6ec00f57f5180f36",
+    "@openzeppelin/contracts/utils/ReentrancyGuard.sol": "32fbb1c908ec1b4de85cc1bb10091aebd5816ffe80dfdd5ca5e084fbea67a462",
+    "@openzeppelin/contracts/utils/cryptography/EIP712.sol": "c20e0789a53610b2551058e0bd556dcd2caa20a7457348c3c73df037fba88861",
+    "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol": "df1954739f18679bae60450ccf2437a29a32a33e65756c1ec08e0f358c806246",
+    "@openzeppelin/contracts/interfaces/IERC4906.sol": "2b14563481c355e6a84127f0ee528d3e3b80fcdd76ff840660784c2445fcc0ae",
+    "@openzeppelin/contracts/utils/introspection/IERC165.sol": "9055c2994b37dea1a41b7b7926dcb510f05dbe2540b0aafc5fbee9558fffd0ca",
+    "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol": "a174525c74ab5d2f066206ec9cebb6b3c618384c53ec35ad224ac1fbbf06b3f0",
+    "@openzeppelin/contracts/utils/Strings.sol": "2db7d21151644c57f75ed3ab55e87f3cf7fbf587a65345650fd740e2cfd50be3",
+    "@openzeppelin/contracts/token/ERC20/ERC20.sol": "9f906af4cba6e7e091dc12d45e6687e1239cf82d17678198424250fd64ab96bd",
+    "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol": "eafee3ffdc7cb2fba4bf6bd16fb28f8e5b4679742e81c2ad42a1b1df5c179feb",
+    "@openzeppelin/contracts/interfaces/IERC1271.sol": "2d17bba201aa2f9c55e317315b872272a60361848dfceb6b1e77081265c79a27",
+    "@openzeppelin/contracts/utils/cryptography/ECDSA.sol": "0964ddd02f4a7a8cf9ba130e3aeead588ca3d425d5bc13cc4221358c69108ed0",
+    "@openzeppelin/contracts/utils/Context.sol": "847fda5460fee70f56f4200f59b82ae622bb03c79c77e67af010e31b7e2cc5b6",
+    "@openzeppelin/contracts/interfaces/IERC165.sol": "dfb3f56fa928a7c6cae41a7ce2c86b9210fa18d33fa26389099d66a0fa790368",
+    "@openzeppelin/contracts/interfaces/IERC721.sol": "4e4412e3eb28d5d2055e7b0e8153a2ab4d143f94e125a03a1b3d655ea7ed0002",
+    "@openzeppelin/contracts/interfaces/IERC1363.sol": "9c3a75a925a6dac9e88b03cddc58d42fe3131b0aaaad84408521f3f7af2f991b",
+    "@openzeppelin/contracts/token/ERC721/IERC721.sol": "ff0eb9902bf0ac099205615fac90eacf34fae637571b05aab3ea35dea53d5f17",
+    "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol": "33223782ea652dca413702ce92f9f59d91d758a035065b24bbedb7dc60c63a78",
+    "@openzeppelin/contracts/token/ERC721/utils/ERC721Utils.sol": "f2041b1685dcf0cf6b968d9b8454e5a46068b1df5ab0e82ba0b269fa2f3099a8",
+    "@openzeppelin/contracts/utils/introspection/ERC165.sol": "61a2b12c96857aaa35f48aeda67a4281637a42494c0b3795be0ae976aa7b3793",
+    "@openzeppelin/contracts/interfaces/draft-IERC6093.sol": "df936240c9a5d342582cbda70dd773b1c1d0e0dda3042b1c17b902ef0c36827b",
+    "@openzeppelin/contracts/utils/math/Math.sol": "92fee281fd46a1b058b190cf21d6b1a528f0433a907850ae1c9bcf36c5c0cd98",
+    "@openzeppelin/contracts/utils/math/SafeCast.sol": "9769274bf53f26a7c7896c526ea1980dc9bea5bf5c2a5fd04870008c4afc1de9",
+    "@openzeppelin/contracts/utils/math/SignedMath.sol": "1ed50b1056af886752f0fb48a0165d381e69bb4a4b18b893b066dc144a7e08d7",
+    "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol": "936a89f512d5da84b0896b66d2398f2bea9eefdf2afa788af5265fcd74302693",
+    "@openzeppelin/contracts/utils/ShortStrings.sol": "542d5dfe5e4375d83f2e3b5246b2d0d7507406a4b582844dbc73bd31ed2faa83",
+    "@openzeppelin/contracts/interfaces/IERC5267.sol": "f89772d2d4fafcbef8b73bb10ee9a3373edec2eedb2f1b302320915b351dc3d1",
+    "@openzeppelin/contracts/utils/cryptography/Hashes.sol": "ecdbce11c5ecdf32b306e26b8ab1b878327c08154b4ccd04518b6b64b298cf31",
+    "@openzeppelin/contracts/interfaces/IERC7913.sol": "f66aad4249885b0f11369bfa825dded60aa4baa0d76d9becdac9daa48c350350",
+    "@openzeppelin/contracts/utils/Bytes.sol": "b8ecad25855c07fe0c65cffaf19c1517751b2837640f8a144ab26d5bf4e6f741",
+    "@openzeppelin/contracts/interfaces/IERC20.sol": "0158e2d3e0e28bedd99eec13dcf1a8aa3a70a5b7e4bb2ad709609c95fcc740d1",
+    "@openzeppelin/contracts/utils/Panic.sol": "270fc8401c1a13fae6a7a4a2dd6e381b95d658896701e51f0d3e2688acab3dec",
+    "@openzeppelin/contracts/utils/StorageSlot.sol": "75704538dcb223239280c6726d9a31cf769a7816718517c997fc7d63bdb70778"
+  },
+  "standardInputReproduced": true,
+  "chainBroadcast": false,
+  "artifacts": {
+    "contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate": {
+      "abiSha256": "2e5730ac20c2e0d74afd431dfa50339ef3d36ce9cd277ec3f6c62429627fa348",
+      "creationBytecodeSha256": "aa521ed4bb84aa75907304a31bf58184e339cadf7cb522a2e104913257b059d1",
+      "runtimeTemplateSha256": "2dec56b641a3a72c094289d1f4e255babcbef615e5a23ec7832220d43567aff9"
+    },
+    "contracts/test/Fixtures.sol:CallbackReceiver": {
+      "abiSha256": "23f8756e7835bc2270f8a7f1a09ef124d2969faf8d2fbb9e95d2290d22870121",
+      "creationBytecodeSha256": "2c39e0b9936dfe77fd7dcbd483368cc94605fcb7128060ca9e864dea9c6b19fc",
+      "runtimeTemplateSha256": "ca84a5d23fe42f0edfe83f69f62691c6dbf620620711cf9a4d5c4dcc3c6f0a92"
+    },
+    "contracts/test/Fixtures.sol:FeeToken": {
+      "abiSha256": "ca1e5821a8d566a1d4aa9595afb2ba5eddf62582aba87ad9c46de4e6a05605c2",
+      "creationBytecodeSha256": "b2cd1db6e1cba67bede734747daa2ccf625310a349f17f2d7705bb481966bd1f",
+      "runtimeTemplateSha256": "0de627124660eea1bb836ab64ff2c65b009f2cc416425ac6942ef2f6b1efc3e3"
+    },
+    "contracts/test/Fixtures.sol:FixtureToken": {
+      "abiSha256": "ca1e5821a8d566a1d4aa9595afb2ba5eddf62582aba87ad9c46de4e6a05605c2",
+      "creationBytecodeSha256": "e1716165bae43b45b8aba1b2bd764d45c89c4c391f888811d953ac17b05d5b58",
+      "runtimeTemplateSha256": "f4c4d8f015f6fd29833c0f3ca4a47297cc510efd873729ce0d8d9ba337b5d1ff"
+    },
+    "contracts/test/Fixtures.sol:SupplyBoundaryHarness": {
+      "abiSha256": "52ecbddf54a0753affcca7e523e27804b59ed33a73507e3ddb24d47414ce4858",
+      "creationBytecodeSha256": "8aa79ecb222b15dac2cbf294611c190c3ddafab9ee2eb8864a41666847b58bc0",
+      "runtimeTemplateSha256": "e8ced2871d833395cf7835c89a0c04de821685c9834604fdcff6c0a20661f018"
+    },
+    "contracts/test/HardeningFixtures.sol:ContractAuthority": {
+      "abiSha256": "379681703f4cef84c71d9fc81590af45e3dc65d8c0732a9afb54ae43ed7a5bcb",
+      "creationBytecodeSha256": "8f2a152517731c68fd0cfa257d93fe636e76ab44c367f1a78b658f60bb2df25b",
+      "runtimeTemplateSha256": "ab307c492d7d9e917e452f504b47456f6b2b61b325583b8974cf858e25c15346"
+    },
+    "contracts/test/HardeningFixtures.sol:HardeningWallet": {
+      "abiSha256": "d291651894e4602eff086ad0811a58836874eb323f1d09049432513cff1542ce",
+      "creationBytecodeSha256": "e31ecab50a1117e65adf2a5e3ce76b8e55372bb853d1d802dc1b9af69351c678",
+      "runtimeTemplateSha256": "aef3c47ac63c42e5e25aa4f553e66448132ba0641da1df43a1d11868fc6578e6"
+    },
+    "contracts/test/R3Fixtures.sol:R3HookToken": {
+      "abiSha256": "182dee9b3d0ec2e2d90fef0fa4a9538f82a61c436eecf01409cfe46b5c7660d8",
+      "creationBytecodeSha256": "e2ca00b82f69eeb13ce7cdbf4da5ef038b254104bd04128225a85cfeaed7ead7",
+      "runtimeTemplateSha256": "85050045ca5abec4b56ae706ec6fc8fc51dda698dc3e6e097e893355deb3778e"
+    },
+    "contracts/test/R3Fixtures.sol:R3OwnerForwarder": {
+      "abiSha256": "6bec71b559dd599c5451b12f916e2abd0007e7b7f4ba52181aa2417b23e517e3",
+      "creationBytecodeSha256": "b716329adc352765289ecc177689845dd3a733e48c829acf144ab6824f16d999",
+      "runtimeTemplateSha256": "8466da199c9d4937e5dff5377dac86bbca5d27b056310adc95f35105cce06e03"
+    },
+    "contracts/testnet/TestEmbeo.sol:TestEmbeo": {
+      "abiSha256": "52a335a797fe9806d341122897970af5c7a94f2a1b40e304300c6a0a39475fca",
+      "creationBytecodeSha256": "6a1ba798c7d16a62995a84d938962ace7ba1f6f42db8cfefd2224bdfc429f34b",
+      "runtimeTemplateSha256": "6254d3064d8d519ad1e2462d20ecd341862d9d468356fec340ee4b16a7073b02"
+    }
+  },
+  "rebuild": "2026-10-27 (compiler): solc 0.8.37 -> 0.8.38 for SOL-2026-7 (YulOptimizerKnowledgeBaseStaleBookkeeping); the only source change is the pragma line in the 5 contracts/ files; same settings and OpenZeppelin sources; runtime code differs from the 0.8.37 build only by one peephole (LT ISZERO -> GT) near the start and the resulting 1-byte offset shift"
+}

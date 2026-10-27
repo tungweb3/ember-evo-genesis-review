@@ -1,0 +1,81 @@
+import {keccak256,toHex} from 'viem';
+import type {MintProof,MintProofReader,StoredMintBinding} from './world-gold.ts';
+import {GENESIS_R5_AUTH_SCHEMA,type GenesisDeployment} from './genesis-gold.ts';
+// Finalized-chain reader for Genesis R5 paid orders. Every fact comes from one finalized block of the pinned deployment
+// (chain id, runtime code hash); a missing, malformed or inconsistent answer throws, and reconcileHeldMintGold keeps the
+// order held. Wall-clock time, a wallet's "confirmed" or a caller's word never settles anything.
+
+export type JsonRpc=(method:string,params:unknown[])=>Promise<unknown>;
+export const GENESIS_RPC_METHODS=new Set(['eth_chainId','eth_getBlockByNumber','eth_getCode','eth_call','eth_getLogs','eth_getTransactionReceipt']);
+/** Plain JSON-RPC over fetch with a method allow-list. Any transport or RPC error is MINT_CHAIN_UNAVAILABLE. */
+export function genesisRpc(url:string,fetcher:typeof fetch=fetch):JsonRpc{
+ let id=0;
+ return async(method,params)=>{
+  if(!GENESIS_RPC_METHODS.has(method))throw Error('RPC_METHOD_NOT_ALLOWED');
+  let reply:{result?:unknown;error?:unknown};
+  try{const r=await fetcher(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:++id,method,params})});reply=await r.json() as typeof reply;}
+  catch{throw Error('MINT_CHAIN_UNAVAILABLE');}
+  if(reply.error!==undefined||reply.result===undefined)throw Error('MINT_CHAIN_UNAVAILABLE');
+  return reply.result;
+ };
+}
+
+const topic=(sig:string)=>keccak256(toHex(sig));
+export const R5_TOPICS={consumed:topic('PaidOrderConsumed(bytes32,address,uint256,uint256)'),minted:topic('GenesisMinted(address,uint256,bytes32,uint8,uint8,bool,uint256)')};
+const SELECTOR={tokenId:topic('paidOrderTokenId(bytes32)').slice(0,10),revoked:topic('paidOrderRevoked(bytes32)').slice(0,10)};
+const fail=(s:string):never=>{throw Error(s);};
+type Json=Record<string,unknown>;
+const obj=(v:unknown):Json=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Json:fail('MINT_CHAIN_UNAVAILABLE');
+const qty=(v:unknown)=>typeof v==='string'&&/^0x(0|[1-9a-f][0-9a-f]*)$/i.test(v)?BigInt(v):fail('MINT_CHAIN_UNAVAILABLE');
+const h32=(v:unknown)=>typeof v==='string'&&/^0x[0-9a-fA-F]{64}$/.test(v)?v.toLowerCase():fail('MINT_CHAIN_UNAVAILABLE');
+const wordAt=(data:string,i:number)=>BigInt('0x'+data.slice(2+64*i,2+64*(i+1)));
+const addrTopic=(t:string)=>/^0x0{24}[0-9a-f]{40}$/.test(t)?'0x'+t.slice(26):fail('MINT_PROOF_CONFLICT');
+const hex=(n:bigint)=>'0x'+n.toString(16);
+
+/** hint.transactionHash (optional): where the consumption is, so no log search is needed. It is verified like a found log. */
+export function createGenesisR5Reader(d:GenesisDeployment,rpc:JsonRpc,hint:{transactionHash?:string}={}):MintProofReader{
+ const contract=d.contract.toLowerCase();
+ return {chainId:d.chainId,contract,chainInstance:d.id,async read(m:StoredMintBinding):Promise<MintProof>{
+  if(m.chainId!==d.chainId||m.contract!==contract||m.chainInstance!==d.id)fail('MINT_SCOPE_MISMATCH');
+  const auth=obj(m.auth),order=obj(auth.order);
+  if(auth.schema!==GENESIS_R5_AUTH_SCHEMA||auth.deploymentId!==d.id||auth.codeHash!==d.codeHash||order.orderId!==m.id||order.wallet!==m.wallet||order.goldCost!==m.gold)fail('MINT_PROOF_CONFLICT');
+  if(qty(await rpc('eth_chainId',[]))!==BigInt(d.chainId))fail('MINT_SCOPE_MISMATCH');
+  const fin=obj(await rpc('eth_getBlockByNumber',['finalized',false])),finNumber=qty(fin.number),finHash=h32(fin.hash),finTime=qty(fin.timestamp);
+  const at=hex(finNumber);
+  const code=await rpc('eth_getCode',[contract,at]);
+  if(typeof code!=='string'||code==='0x'||keccak256(code as `0x${string}`)!==d.codeHash)fail('MINT_SCOPE_MISMATCH');
+  const call=async(selector:string)=>{const r=await rpc('eth_call',[{to:contract,data:selector+m.id.slice(2)},at]);if(typeof r!=='string'||!/^0x[0-9a-f]{64}$/i.test(r))fail('MINT_CHAIN_UNAVAILABLE');return BigInt(r as string);};
+  const tokenId=await call(SELECTOR.tokenId),revokedWord=await call(SELECTOR.revoked);
+  if(revokedWord>1n)fail('MINT_CHAIN_UNAVAILABLE');
+  let transactionHash:string|undefined;
+  if(tokenId!==0n){
+   let txHash=hint.transactionHash;
+   if(!txHash){
+    const logs=await rpc('eth_getLogs',[{address:contract,topics:[R5_TOPICS.consumed,m.id],fromBlock:hex(BigInt(d.deployBlock)),toBlock:at}]);
+    if(!Array.isArray(logs))fail('MINT_CHAIN_UNAVAILABLE');
+    const live=(logs as unknown[]).map(obj).filter(l=>l.removed!==true);if(live.length!==1)fail('MINT_PROOF_CONFLICT');
+    txHash=h32(live[0].transactionHash);
+   }
+   const receipt=obj(await rpc('eth_getTransactionReceipt',[txHash]));
+   const rBlock=qty(receipt.blockNumber),rHash=h32(receipt.blockHash);
+   if(qty(receipt.status)!==1n||String(receipt.to).toLowerCase()!==contract||rBlock>finNumber)fail('MINT_PROOF_CONFLICT');
+   if(h32(obj(await rpc('eth_getBlockByNumber',[hex(rBlock),false])).hash)!==rHash)fail('MINT_PROOF_CONFLICT');
+   const own=(Array.isArray(receipt.logs)?receipt.logs as unknown[]:[]).map(obj).filter(l=>String(l.address).toLowerCase()===contract&&l.removed!==true);
+   const topics=(l:Json)=>Array.isArray(l.topics)?(l.topics as unknown[]).map(h32):[];
+   const consumed=own.filter(l=>topics(l)[0]===R5_TOPICS.consumed&&topics(l)[1]===m.id);
+   const minted=own.filter(l=>topics(l)[0]===R5_TOPICS.minted);
+   if(consumed.length!==1||minted.length!==1)fail('MINT_PROOF_CONFLICT');
+   const c=topics(consumed[0]),g=topics(minted[0]),cData=String(consumed[0].data),gData=String(minted[0].data);
+   if(!/^0x[0-9a-f]{64}$/i.test(cData)||!/^0x[0-9a-f]{256}$/i.test(gData)||c.length!==4||g.length!==4)fail('MINT_PROOF_CONFLICT');
+   // PaidOrderConsumed(orderId, wallet, tokenId; goldCost) and GenesisMinted(wallet, tokenId, lookKey; choice, skin, paid, cost)
+   if(addrTopic(c[2])!==m.wallet||BigInt(c[3])!==tokenId||wordAt(cData,0)!==BigInt(m.gold)
+    ||addrTopic(g[1])!==m.wallet||BigInt(g[2])!==tokenId||g[3]!==order.lookKey||wordAt(gData,0)!==BigInt(order.choice as number)
+    ||wordAt(gData,2)!==1n||wordAt(gData,3)!==BigInt(order.embeoCost as string))fail('MINT_PROOF_CONFLICT');
+   transactionHash=h32(receipt.transactionHash??txHash);
+  }
+  // The finalized block must still be the one every read above used.
+  if(h32(obj(await rpc('eth_getBlockByNumber',[at,false])).hash)!==finHash)fail('MINT_CHAIN_UNAVAILABLE');
+  return {schema:'ember-mint-proof-v1',mode:'finalized-chain',orderId:m.id,wallet:m.wallet,gold:m.gold,chainId:d.chainId,contract,chainInstance:d.id,
+   blockHash:finHash,blockNumber:String(finNumber),chainTimeMs:Number(finTime)*1000,tokenId:String(tokenId),revoked:revokedWord===1n,...transactionHash?{transactionHash}:{}};
+ }};
+}
