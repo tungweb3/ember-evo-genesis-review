@@ -2,23 +2,20 @@
 
 Ember Evo Genesis is an **unofficial, community-made** NFT collection (1,688 3D "Pepe" characters).
 
-**Current: [Submission5](Submission5/AUDIT_README.md) — fifth pre-audit (2026-10-28), answering the fourth audit
-(explorer.imd.fun job b0b1d96a: a reveal-commitment acceptance now signs a recent block instead of a deadline; the
-withholding trust model restated; a stricter GOLD-book check).** Read [Submission5/AUDIT_README.md](Submission5/AUDIT_README.md)
-first, then [Submission5/FINDINGS_RESPONSE.md](Submission5/FINDINGS_RESPONSE.md) (each Submission 4 finding, what
-changed, which test covers it). The fourth audit's report is attached unchanged:
-[Submission5/AUDIT_REPORT_b0b1d96a.md](Submission5/AUDIT_REPORT_b0b1d96a.md) (2 low, 1 info; all three handled in Submission 5).
+**Current: [Submission6](Submission6/AUDIT_README.md) — sixth pre-audit (2026-10-29): more payment tokens at the
+same $20, each with its own GOLD price (imdUSD v1 and later v2: 1,200 GOLD; USDC: 1,600 GOLD), added by the owner at
+most twice, usable two days after being added.** Not deployed on any chain; `Submission6/build/standard-input.json`
+reproduces it (solc 0.8.38, runtime 24,353 bytes). Everything else is unchanged from Submission5, whose AUDIT_README
+stays the reference for the rest of the design.
 
-- Primary scope: [`Submission5/contracts/EmberEvoGenesisCandidate.sol`](Submission5/contracts/EmberEvoGenesisCandidate.sol)
-  (ERC-721, OpenZeppelin 5.4.0, solc 0.8.38, viaIR, optimizer 200, EVM cancun).
-- Deployed on Sepolia and verified on Etherscan (exact match):
-  https://sepolia.etherscan.io/address/0x6A7626c15C4746DA348E4D11F6f38228C743d25d#code
-- `Submission5/build/standard-input.json` is the exact standard-JSON input that reproduces the deployed bytecode.
-- Secondary scope (trust model): `Submission5/offchain/` (approval signer and off-chain GOLD ledger).
+- Primary scope: [`Submission6/contracts/EmberEvoGenesisCandidate.sol`](Submission6/contracts/EmberEvoGenesisCandidate.sol);
+  the change from Submission5 is [Submission6/build/EmberEvoGenesisCandidate.Submission5-to-6.diff](Submission6/build/EmberEvoGenesisCandidate.Submission5-to-6.diff).
+- Secondary scope: `Submission6/offchain/` (approval signer and the GOLD book's per-token price list).
 
-[Submission1](Submission1/AUDIT_README.md) to [Submission4](Submission4/AUDIT_README.md) are the earlier pre-audits,
-kept unchanged as history (their Sepolia contracts `0x8ce6…2efa`, `0xb972…a836`, `0x0FB5…4085` and `0xD5f3…F8Af` are
-retired).
+[Submission5](Submission5/AUDIT_README.md) (Sepolia `0x6A7626c15C4746DA348E4D11F6f38228C743d25d`, verified on Etherscan; the
+fourth audit b0b1d96a handled) and [Submission1](Submission1/AUDIT_README.md) to [Submission4](Submission4/AUDIT_README.md)
+are the earlier pre-audits, kept unchanged as history (the Sepolia contracts of Submissions 1-4, `0x8ce6…2efa`,
+`0xb972…a836`, `0x0FB5…4085` and `0xD5f3…F8Af`, are retired).
 
 `SHA256SUMS` covers every file in this repository except itself; each `SubmissionN/SHA256SUMS.txt` covers its package.
 No keys, seeds or credentials are included.

@@ -1,0 +1,145 @@
+--- Submission5/contracts/EmberEvoGenesisCandidate.sol
++++ Submission6/contracts/EmberEvoGenesisCandidate.sol
+@@ -53,6 +53,16 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+ ///      lives at most an hour.
+ ///      Swarm audit 2026-10-28 (job b0b1d96a): a commitment acceptance signs a recent block's number and hash instead of
+ ///      a deadline, so its age is bounded by blockhash() (256 blocks), not by the signer's choice of deadline.
++///      Owner 2026-10-29: more payment tokens at the same dollar price. imdUSD v1 is the deployment's paymentToken; the
++///      owner may add at most MAX_EXTRA_PAYMENT_TOKENS more, each once and for good (USDC before minting opens, imdUSD v2
++///      when it exists: a new token with a 1:1 migration from v1, on the imdUSD team's suggestion). An added token has
++///      6 or 18 decimals and is charged paidCost converted exactly to its decimals (20 USDC = 20e6), to the same
++///      recipient, from PAYMENT_TOKEN_DELAY after it is added so buyers see it on chain first. The caller names the token
++///      in mintPaid. GenesisMinted.cost stays paidCost (the dollar price in 18 decimals) whichever token paid.
++///      Owner 2026-10-29: each token has its own GOLD price, so paying in imdUSD is a GOLD discount (imdUSD v1 and v2
++///      1,200 GOLD = paidGoldCost; USDC 1,600 GOLD, set when it is added). mintPaid takes the GOLD price of the token
++///      actually paid, checks the signed PaidAuthorization against it and reports it in PaidOrderConsumed, so an order
++///      reserved at the discounted price cannot be paid in a token with a higher GOLD price.
+ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     using SafeERC20 for IERC20;
+     /// configureSupply can never go above this (guards against a mistyped number; owner decision 2026-10-22).
+@@ -78,13 +88,17 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     /// setRevealCommit refuses this many hashes above every anchor too: their preimages are public (audit 388b71cb,
+     /// finding 5). A safeguard against operator error, not a proof that a chain is fresh.
+     uint256 private constant HASHES_ABOVE_ANCHOR = 32;
++    /// Payment tokens the owner may add after deployment, and how long after being added one becomes usable.
++    uint256 private constant MAX_EXTRA_PAYMENT_TOKENS = 2;
++    uint256 private constant PAYMENT_TOKEN_DELAY = 2 days;
+     /// EIP-2935 block-hash history (Prague): hashes of the last 8,191 blocks; used once blockhash() has expired.
+     address public constant BLOCK_HASH_HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
+ 
+     struct RetiredChain { bytes32 last; uint256 opened; }
+     /// The signer's paid-mint authorization (the GOLD book holds GOLD for exactly this order). mintPaid rebuilds it from
+     /// the call and this contract's own values (caller, recipient, costs, signer epoch), so only orderId and deadline
+-    /// travel in calldata (gas review 2026-10-28). embeoCost is the payment-token amount (named before imdUSD).
++    /// travel in calldata (gas review 2026-10-28). embeoCost is paidCost, the dollar price in 18 decimals, whichever token
++    /// pays (named before imdUSD; 20e18 also when 20 USDC = 20e6 is paid); goldCost is the GOLD price of the token paid.
+     bytes32 private constant PAID_AUTH_TYPEHASH = keccak256("PaidAuthorization(bytes32 orderId,address wallet,bytes32 lookKey,uint8 choice,bytes32 uriHash,address recipient,uint256 embeoCost,uint256 goldCost,uint256 deadline,uint256 signerEpoch)");
+     /// The free route's approval. `paid` is always false here: the paid route has its own PaidAuthorization (since
+     /// 2026-10-28 mintPaid verifies only that), so a free approval can never pay for a paid mint or the other way round.
+@@ -109,6 +123,11 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     uint256 public immutable paidCost;
+     uint256 public immutable paidGoldCost;
+     uint256 public immutable startBlock;
++    /// Payment tokens: the amount charged per paid mint (bits 0-127), its GOLD price (bits 128-215) and the time it
++    /// becomes usable (bits 216-255); paymentToken from deployment (paidCost, paidGoldCost, usable at once), added tokens
++    /// from addPaymentToken; zero for any other token. Never removed or changed once set.
++    mapping(address => uint256) public paymentTokens;
++    uint256 private extraPaymentTokenCount;   // (code size: PaymentTokenAdded events tell the count)
+     mapping(bytes32 => uint256) public paidOrderTokenId;
+     mapping(bytes32 => bool) public paidOrderRevoked;
+     // One slot holds everything a mint checks before the token itself (one cold read instead of five; gas review
+@@ -176,6 +195,7 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     event PaidOrderRevoked(bytes32 indexed orderId);
+     event MintPauseChanged(bool paused);
+     event PaidPriceApproved(uint256 cost);
++    event PaymentTokenAdded(address indexed token, uint256 amount, uint256 goldCost, uint256 usableAt);
+     event AppearanceSignerProposed(address indexed proposed, uint256 nextEpoch, uint256 proposalNonce);
+     event AppearanceSignerProposalCancelled(address indexed proposed, uint256 revokedProposalNonce);
+     event AppearanceSignerChanged(address indexed previous, address indexed next, uint256 epoch);
+@@ -215,8 +235,10 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         require(signer_ != address(0) && signer_ != address(this), "INVALID_ROLE");
+         // the token contract itself, or this one, could never pass the payments on
+         require(recipient_ != address(0) && recipient_ != address(this) && recipient_ != token_, "INVALID_ROLE");
+-        require(cost_ != 0 && goldCost_ != 0 && bytes(symbol_).length != 0, "PARAMETERS_REQUIRED");
++        // cost_ < 2^128 and goldCost_ < 2^88 keep every added token's packed amount and GOLD price in range (2026-10-29).
++        require(cost_ != 0 && cost_ >> 128 == 0 && goldCost_ != 0 && goldCost_ >> 88 == 0 && bytes(symbol_).length != 0, "PARAMETERS_REQUIRED");
+         paymentToken = IERC20(token_); appearanceSigner = signer_; paymentRecipient = recipient_; paidCost = cost_; paidGoldCost = goldCost_;
++        paymentTokens[token_] = goldCost_ << 128 | cost_;
+         startBlock = block.number;
+         // Skin caps at deployment (owner 2026-10-28): green 1,068, ice blue 218, nebula purple 218, sakura pink 68,
+         // ember orange 68, molten gold 48; 1,688 in total (was 1,288 on 2026-10-25, 888 on 2026-10-22).
+@@ -379,7 +401,26 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         emit AppearanceSignerProposalCancelled(proposed, revokedNonce);
+     }
+     /// Opens the paid route at the deploy-time price (paidCost / paidGoldCost are immutable). Cannot be undone.
++    /// Trust note (2026-10-29): after this the owner can still add up to MAX_EXTRA_PAYMENT_TOKENS tokens, each at a GOLD
++    /// price of its choosing (the dollar price is always paidCost); the only on-chain protection is PAYMENT_TOKEN_DELAY,
++    /// and an added token can never be removed, so the owner Safe dry-runs addPaymentToken before signing it.
+     function approvePaidPrice() external onlyOwner { paidPriceApproved = true; emit PaidPriceApproved(paidCost); }
++    /// Adds a payment token for good (at most MAX_EXTRA_PAYMENT_TOKENS, each once): a contract with 6 or 18 decimals
++    /// other than paymentToken or the recipient (this contract has no decimals(), so the call below refuses it), charged paidCost converted exactly to its decimals and
++    /// usable PAYMENT_TOKEN_DELAY from now, at its own GOLD price goldCost. The exact-payment check in mintPaid still
++    /// refuses taxed tokens.
++    function addPaymentToken(address token, uint256 goldCost) external onlyOwner {
++        require(extraPaymentTokenCount < MAX_EXTRA_PAYMENT_TOKENS && paymentTokens[token] == 0
++            && token != paymentRecipient && token.code.length != 0, "TOKEN_IDENTITY_REQUIRED");
++        uint256 decimals = IERC20Metadata(token).decimals();
++        uint256 unit = decimals == 6 ? 1e12 : 1;
++        uint256 amount = paidCost / unit;
++        require((decimals == 6 || decimals == 18) && amount * unit == paidCost && goldCost != 0 && goldCost >> 88 == 0, "TOKEN_IDENTITY_REQUIRED");
++        uint256 usableAt = block.timestamp + PAYMENT_TOKEN_DELAY;
++        ++extraPaymentTokenCount;
++        paymentTokens[token] = usableAt << 216 | goldCost << 128 | amount;
++        emit PaymentTokenAdded(token, amount, goldCost, usableAt);
++    }
+     /// Override for a chosen-skin token (by default its URI is derived, see tokenURI); a random token's URI follows the
+     /// pending / reveal URIs below.
+     function setTokenURI(uint256 id, string calldata uri) external onlyOwner {
+@@ -559,9 +600,13 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     }
+     /// One paid token per caller per transaction; future transactions have no per-wallet total limit. The signer's
+     /// PaidAuthorization is checked against the call and this contract's own values (wallet = caller, recipient, both
+-    /// costs, signer epoch), so an order signed for anything else fails the signature check (gas review 2026-10-28: one
+-    /// signature instead of two, no order struct in calldata).
+-    function mintPaid(bytes32 lookKey, uint8 choice, string calldata uri, bytes32 orderId, uint256 deadline, bytes calldata goldSignature, bytes32[] calldata reveals) external nonReentrant {
++    /// costs (the GOLD cost of the token paid), signer epoch), so an order signed for anything else fails the signature check (gas review 2026-10-28: one
++    /// signature instead of two, no order struct in calldata). token: paymentToken, or a usable added token (2026-10-29).
++    function mintPaid(bytes32 lookKey, uint8 choice, string calldata uri, bytes32 orderId, uint256 deadline, bytes calldata goldSignature, bytes32[] calldata reveals, IERC20 token) external nonReentrant {
++        uint256 accepted = paymentTokens[address(token)];
++        require(accepted != 0 && block.timestamp >= accepted >> 216, "PAYMENT_TOKEN_UNAVAILABLE");
++        uint256 amount = uint128(accepted);
++        uint256 gold = uint88(accepted >> 128);
+         _settleReady(reveals);
+         _checkMint(lookKey, choice, uri);
+         require(block.timestamp >= freeStartAt, "SALE_NOT_STARTED");
+@@ -572,22 +617,23 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         uint256 epoch = signerEpoch;
+         address recipient = paymentRecipient;
+         uint256 cost = paidCost;
+-        bytes32 goldDigest = _hashTypedDataV4(keccak256(abi.encode(PAID_AUTH_TYPEHASH, orderId, msg.sender, lookKey, choice, keccak256(bytes(uri)), recipient, cost, paidGoldCost, deadline, epoch)));
++        bytes32 goldDigest = _hashTypedDataV4(keccak256(abi.encode(PAID_AUTH_TYPEHASH, orderId, msg.sender, lookKey, choice, keccak256(bytes(uri)), recipient, cost, gold, deadline, epoch)));
+         require(SignatureChecker.isValidSignatureNow(signer, goldDigest, goldSignature), "GOLD_RESERVATION_AUTHORITY");
+         _claimPaidTransaction();
+         // Off-chain GOLD was reserved before this authorization was signed.
+         // This receipt and the NFT/payment revert together; it is not an on-chain GOLD token.
+         paidOrderTokenId[orderId] = totalMinted() + 1;
+-        uint256 payerBefore = paymentToken.balanceOf(msg.sender);
+-        uint256 recipientBefore = paymentToken.balanceOf(recipient);
++        uint256 payerBefore = token.balanceOf(msg.sender);
++        uint256 recipientBefore = token.balanceOf(recipient);
+         // nonReentrant guards both mint paths while the external token call is in progress. The payer must lose and the
+         // recipient gain exactly `cost`, which refuses fee-on-transfer and burn-on-transfer tokens (a separate totalSupply
+         // check would add nothing). A payer that is the recipient itself fails it too (its balance does not move).
+-        require(payerBefore >= cost, "BALANCE_REQUIRED");
+-        paymentToken.safeTransferFrom(msg.sender, recipient, cost);
+-        require(paymentToken.balanceOf(msg.sender) == payerBefore - cost && paymentToken.balanceOf(recipient) == recipientBefore + cost, "EXACT_PAYMENT_REQUIRED");
++        // amount is the token's own units; GenesisMinted below still records cost (paidCost, the dollar price).
++        require(payerBefore >= amount, "BALANCE_REQUIRED");
++        token.safeTransferFrom(msg.sender, recipient, amount);
++        require(token.balanceOf(msg.sender) == payerBefore - amount && token.balanceOf(recipient) == recipientBefore + amount, "EXACT_PAYMENT_REQUIRED");
+         uint256 id = _mintOne(lookKey, choice, true, cost);
+-        emit PaidOrderConsumed(orderId, msg.sender, id, paidGoldCost);
++        emit PaidOrderConsumed(orderId, msg.sender, id, gold);
+         require(appearanceSigner == signer && signerEpoch == epoch && !mintPaused, "MINT_CONTEXT_CHANGED");
+     }
+     /// Prevent a still-valid authorization from spending a reservation after cancellation.

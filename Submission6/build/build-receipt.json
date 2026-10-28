@@ -1,0 +1,30 @@
+{
+ "scope": "Submission6 source build; NOT DEPLOYED on any chain",
+ "compiler": "0.8.38+commit.1835d247.Emscripten.clang",
+ "compilerSoljsonSha256": "6c74ffba0ea4cf9521e78b16052a98208770bb7677616de08ced239f4312d390",
+ "settings": {
+  "optimizer": {
+   "enabled": true,
+   "runs": 200
+  },
+  "viaIR": true,
+  "evmVersion": "cancun",
+  "outputSelection": {
+   "*": {
+    "*": [
+     "abi",
+     "metadata",
+     "evm.bytecode.object",
+     "evm.deployedBytecode.object"
+    ]
+   }
+  }
+ },
+ "sources": 44,
+ "standardInputSha256": "b5ac5e9362fd56b213f25cdc489c9d35cfccf97fe1d802fe11259c6ac683e86b",
+ "contract": "contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate",
+ "runtimeBytes": 24353,
+ "runtimeSha256": "da38004d16c4ec8e181920510fa1d05cfb68ffe5844b7b28149bf3d5825fe86f",
+ "initcodeSha256": "cece881e690bb0e049cba6eb7823f1f16844a34fdb7ff0ecbf4ab2db737ac70d",
+ "sourceSha256": "fb715ffbcf0d1685a363885dcb7a9203f2922cec7875dda8e4c2b609caec2c86"
+}
