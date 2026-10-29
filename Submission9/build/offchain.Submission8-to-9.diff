@@ -1,0 +1,445 @@
+diff --git a/Submission8/offchain/gold-book/server/genesis-deployments.ts b/Submission9/offchain/gold-book/server/genesis-deployments.ts
+index 5a4d7ed..0d1e4ae 100644
+--- a/Submission8/offchain/gold-book/server/genesis-deployments.ts
++++ b/Submission9/offchain/gold-book/server/genesis-deployments.ts
+@@ -1,7 +1,7 @@
+ import type {GenesisDeployment} from './genesis-gold.ts';
+ // Genesis deployments the GOLD book accepts paid orders for. Each entry pins chain, contract, runtime code hash, deploy
+-// block, both immutable costs, every payment token with its GOLD price, the EIP-712 domain version and the payment
+-// recipient (read back from the deployed contract, paymentTokens(token), before an entry is added).
++// block, both immutable costs, every payment token with its GOLD price and exact unit amount, the EIP-712 domain version
++// and the payment recipient (read back from the deployed contract, paymentTokens(token), before an entry is added).
+ // Owner 2026-10-29: mainnet pays in imdUSD v1 (1,200 GOLD); USDC (1,600 GOLD) is added right after deployment and
+ // imdUSD v2 (1,200 GOLD) when it exists. The entry is added after USDC is added on chain, so it lists both tokens from
+ // the start; v2 is appended to addedTokens when it is added on chain (Genesis audit 944905c3: every order names its
+diff --git a/Submission8/offchain/gold-book/server/genesis-gold-reader.ts b/Submission9/offchain/gold-book/server/genesis-gold-reader.ts
+index 6faed3e..348fbda 100644
+--- a/Submission8/offchain/gold-book/server/genesis-gold-reader.ts
++++ b/Submission9/offchain/gold-book/server/genesis-gold-reader.ts
+@@ -1,6 +1,6 @@
+ import {keccak256,toHex} from 'viem';
+ import type {MintProof,MintProofReader,StoredMintBinding} from './world-gold.ts';
+-import {GENESIS_R5_AUTH_SCHEMA,GENESIS_MAX_TTL_S,type GenesisDeployment} from './genesis-gold.ts';
++import {GENESIS_R5_AUTH_SCHEMA,GENESIS_MAX_TTL_S,genesisTokenAmount,type GenesisDeployment} from './genesis-gold.ts';
+ // Finalized-chain reader for Genesis paid orders. Every fact comes from one finalized block of the pinned deployment
+ // (chain id, runtime code hash); a missing, malformed or inconsistent answer throws, and reconcileHeldMintGold keeps the
+ // order held. Wall-clock time, a wallet's "confirmed" or a caller's word never settles anything.
+@@ -89,7 +89,8 @@ export function createGenesisR5Reader(d:GenesisDeployment,rpc:JsonRpc,hint:{tran
+  if(!Number.isSafeInteger(logBlockRange)||logBlockRange<1)fail('MINT_CHAIN_UNAVAILABLE');
+  // The runtime code at a block is fixed by that block's hash, so one reader (one cron page) fetches and hashes the
+  // ~24 KB bytecode once per finalized block instead of once per order (review 2026-10-28: the cron's 50 ms CPU limit).
+- let codeVerifiedAt='';
++ // A mismatch is remembered too (World audit 93dae57f finding 2: it used to be refetched and rehashed for every order).
++ let codeCheckedAt='',codeOk=false;
+  return {chainId:d.chainId,contract,chainInstance:d.id,async read(m:StoredMintBinding):Promise<MintProof>{
+   if(m.chainId!==d.chainId||m.contract!==contract||m.chainInstance!==d.id)fail('MINT_SCOPE_MISMATCH');
+   const auth=obj(m.auth),order=obj(auth.order);
+@@ -98,11 +99,12 @@ export function createGenesisR5Reader(d:GenesisDeployment,rpc:JsonRpc,hint:{tran
+   if(qty(await rpc('eth_chainId',[]))!==BigInt(d.chainId))fail('MINT_SCOPE_MISMATCH');
+   const fin=obj(await rpc('eth_getBlockByNumber',['finalized',false])),finNumber=qty(fin.number),finHash=h32(fin.hash),finTime=qty(fin.timestamp);
+   const at=hex(finNumber);
+-  if(codeVerifiedAt!==finHash){
++  if(codeCheckedAt!==finHash){
+    const code=await rpc('eth_getCode',[contract,at]);
+-   if(typeof code!=='string'||code==='0x'||keccak256(code as `0x${string}`)!==d.codeHash)fail('MINT_SCOPE_MISMATCH');
+-   codeVerifiedAt=finHash;
++   if(typeof code!=='string')fail('MINT_SCOPE_MISMATCH');
++   codeOk=code!=='0x'&&keccak256(code as `0x${string}`)===d.codeHash;codeCheckedAt=finHash;
+   }
++  if(!codeOk)fail('MINT_SCOPE_MISMATCH');
+   const call=async(selector:string)=>{const r=await rpc('eth_call',[{to:contract,data:selector+m.id.slice(2)},at]);if(typeof r!=='string'||!/^0x[0-9a-f]{64}$/i.test(r))fail('MINT_CHAIN_UNAVAILABLE');return BigInt(r as string);};
+   const tokenId=await call(SELECTOR.tokenId),revokedWord=await call(SELECTOR.revoked);
+   if(revokedWord>1n)fail('MINT_CHAIN_UNAVAILABLE');
+@@ -145,11 +147,16 @@ export function createGenesisR5Reader(d:GenesisDeployment,rpc:JsonRpc,hint:{tran
+    // The token that paid (World audit e3e9b712 finding 3): neither event names it, so the payment itself is read. mintPaid
+    // pulls it with token.safeTransferFrom(msg.sender = the order's wallet, paymentRecipient, amount), so the same receipt
+    // must hold a Transfer emitted by the order's token from the wallet to the order's recipient. Otherwise a hold for
+-   // one token could be consumed by a mint paid in another token of the same GOLD price.
+-   const token=String(order.token).toLowerCase(),recipient=String(order.recipient).toLowerCase();
++   // one token could be consumed by a mint paid in another token of the same GOLD price. The Transfer must carry the
++   // exact amount the registry lists for that token (World audit 93dae57f finding 1: a 0 or 1-wei Transfer of the
++   // order's token batched next to a mint paid in another token used to pass).
++   const token=String(order.token).toLowerCase(),recipient=String(order.recipient).toLowerCase(),amount=genesisTokenAmount(d,token);
++   if(amount===undefined)fail('MINT_PROOF_CONFLICT');
+    const paid=(Array.isArray(receipt.logs)?receipt.logs as unknown[]:[]).map(obj).filter(l=>{
+     if(String(l.address).toLowerCase()!==token||l.removed===true)return false;
+-    const t=topics(l);return t.length===3&&t[0]===R5_TOPICS.transfer&&addrTopic(t[1])===m.wallet&&addrTopic(t[2])===recipient;});
++    const t=topics(l),data=String(l.data);
++    return t.length===3&&t[0]===R5_TOPICS.transfer&&addrTopic(t[1])===m.wallet&&addrTopic(t[2])===recipient
++     &&/^0x[0-9a-f]{64}$/i.test(data)&&wordAt(data,0)===BigInt(amount!);});
+    if(!paid.length)fail('MINT_PROOF_CONFLICT');
+    transactionHash=h32(receipt.transactionHash??txHash);
+   }
+diff --git a/Submission8/offchain/gold-book/server/genesis-gold.ts b/Submission9/offchain/gold-book/server/genesis-gold.ts
+index 4dcf616..6409328 100644
+--- a/Submission8/offchain/gold-book/server/genesis-gold.ts
++++ b/Submission9/offchain/gold-book/server/genesis-gold.ts
+@@ -25,13 +25,16 @@ export const GENESIS_MAX_TTL_S=900;
+  *  contract's paidCost, the dollar price in 18 decimals (named before the token became imdUSD); the contract signs it and
+  *  reports it in GenesisMinted.cost whichever token paid (20 USDC = 20e6 is charged, 20e18 is reported), so one value
+  *  serves every token (World audit 8febfeed finding 1 read the single-token Submission5 contract, which reported the
+- *  amount paid). paymentToken / goldCost: the deployment's payment token (imdUSD v1) and its GOLD price;
+- *  addedTokens: the tokens added with addPaymentToken and their GOLD prices (owner 2026-10-29: USDC 1,600 GOLD,
+- *  imdUSD v2 1,200; imdUSD is the discounted price), at most two. The order names its token (Genesis audit 944905c3,
++ *  amount paid). paymentToken / goldCost / paymentAmount: the deployment's payment token (imdUSD v1), its GOLD price
++ *  and the exact amount mintPaid charges in its smallest unit (paymentTokens(token): low 128 bits);
++ *  addedTokens: the tokens added with addPaymentToken with their GOLD prices and amounts (owner 2026-10-29: USDC 1,600
++ *  GOLD for 20000000, imdUSD v2 1,200; imdUSD is the discounted price), at most two. The reader settles an order only on
++ *  a Transfer of exactly that amount (World audit 93dae57f finding 1). The order names its token (Genesis audit 944905c3,
+  *  finding 1) and the contract's PaidAuthorization binds it, so an order is held only at the price listed for that
+  *  token and is payable only in it. All are read back from the deployed contract before an entry is added. */
+ export type GenesisDeployment={id:string;environment:'production'|'sepolia'|'local';chainId:number;contract:string;codeHash:string;
+- deployBlock:string;embeoCost:string;paymentToken:string;goldCost:string;addedTokens:readonly {token:string;goldCost:string}[];signer:string;domainVersion:string;recipient:string};
++ deployBlock:string;embeoCost:string;paymentToken:string;goldCost:string;paymentAmount:string;addedTokens:readonly {token:string;goldCost:string;amount:string}[];signer:string;
++ domainVersion:string;recipient:string};
+ export type GenesisOrder={orderId:string;wallet:string;lookKey:string;choice:number;uriHash:string;recipient:string;token:string;embeoCost:string;
+  goldCost:string;deadline:string;signerEpoch:string};
+ export const GOLD_CONSENT_TYPES={GenesisGoldHold:[{name:'orderId',type:'bytes32'},{name:'wallet',type:'address'},{name:'goldCost',type:'uint256'},
+@@ -57,11 +60,11 @@ export function pinnedDeployment(d:GenesisDeployment):GenesisDeployment{
+  const lowAddr=(v:unknown)=>typeof v==='string'&&/^0x[0-9a-fA-F]{40}$/.test(v)?v.toLowerCase():fail('MINT_DEPLOYMENT_INVALID');
+  const codeHash=typeof d.codeHash==='string'&&/^0x[0-9a-fA-F]{64}$/.test(d.codeHash)?d.codeHash.toLowerCase():fail('MINT_DEPLOYMENT_INVALID');
+  const paymentToken=lowAddr(d.paymentToken);
+- // at most two added tokens, each a distinct token other than paymentToken, each with a positive GOLD price
+- const added=Array.isArray(d.addedTokens)&&d.addedTokens.length<=2?d.addedTokens.map(t=>record(t)&&exact(t,['token','goldCost'])&&dec(t.goldCost)&&t.goldCost!=='0'
+-  ?{token:lowAddr(t.token),goldCost:t.goldCost as string}:fail('MINT_DEPLOYMENT_INVALID')):fail('MINT_DEPLOYMENT_INVALID');
++ // at most two added tokens, each a distinct token other than paymentToken, each with a positive GOLD price and amount
++ const added=Array.isArray(d.addedTokens)&&d.addedTokens.length<=2?d.addedTokens.map(t=>record(t)&&exact(t,['token','goldCost','amount'])&&dec(t.goldCost)&&t.goldCost!=='0'
++  &&dec(t.amount)&&t.amount!=='0'?{token:lowAddr(t.token),goldCost:t.goldCost as string,amount:t.amount as string}:fail('MINT_DEPLOYMENT_INVALID')):fail('MINT_DEPLOYMENT_INVALID');
+  if(added.some((t,i)=>t.token===paymentToken||added.findIndex(u=>u.token===t.token)!==i))fail('MINT_DEPLOYMENT_INVALID');
+- if(!dec(d.deployBlock)||!dec(d.embeoCost)||!dec(d.goldCost)||d.goldCost==='0'||typeof d.domainVersion!=='string'||!/^[0-9]{1,8}$/.test(d.domainVersion)
++ if(!dec(d.deployBlock)||!dec(d.embeoCost)||!dec(d.goldCost)||d.goldCost==='0'||!dec(d.paymentAmount)||d.paymentAmount==='0'||typeof d.domainVersion!=='string'||!/^[0-9]{1,8}$/.test(d.domainVersion)
+   ||!Number.isSafeInteger(d.chainId)||d.chainId<1)fail('MINT_DEPLOYMENT_INVALID');
+  return {...d,paymentToken,addedTokens:added,contract:lowAddr(d.contract),codeHash,recipient:lowAddr(d.recipient),signer:lowAddr(d.signer)};
+ }
+@@ -73,6 +76,10 @@ export function genesisDeployment(list:readonly GenesisDeployment[],environment:
+ export function genesisTokenGoldCost(d:GenesisDeployment,token:string){
+  return token===d.paymentToken?d.goldCost:d.addedTokens.find(t=>t.token===token)?.goldCost;
+ }
++/** The exact amount (smallest unit) mintPaid charges in a payment token, or undefined for a token it does not list. */
++export function genesisTokenAmount(d:GenesisDeployment,token:string){
++ return token===d.paymentToken?d.paymentAmount:d.addedTokens.find(t=>t.token===token)?.amount;
++}
+ /** Every field fixed and normalized, in one key order, so a retry stores byte-identical JSON. prices=false (an
+  *  identical retry of a stored order, World audit 8febfeed finding 4) skips the registry's price, recipient and cost
+  *  check: the caller compares the result byte for byte with the order that passed it when it was first held. */
+diff --git a/Submission8/offchain/signer/README.md b/Submission9/offchain/signer/README.md
+index 0cf225c..548375a 100644
+--- a/Submission8/offchain/signer/README.md
++++ b/Submission9/offchain/signer/README.md
+@@ -93,10 +93,18 @@
+ 
+ | 變數 | 格式 | 說明 |
+ |---|---|---|
+-| `PAYMENT_TOKENS` | 逗號分隔的代幣地址，例如 `0xAAA…,0xBBB…` | 簽章服務只替這些代幣開單。沒設＝鏈上能用的代幣都開。鏈上的代幣一旦加入就**移不掉**，所以這是停用某個代幣（例如 USDC 收款地址被凍結、imdUSD v1 換成 v2）的唯一開關。設了但是空的，或有一個地址格式錯，付費路線每次都回 500 `CONFIG_PAYMENT_TOKENS`。 |
++| `PAYMENT_TOKENS` | 逗號分隔的代幣地址，例如 `0xAAA…,0xBBB…` | 簽章服務只替這些代幣開單。沒設＝鏈上能用的代幣都開。鏈上的代幣一旦加入就**移不掉**，所以這是停用某個代幣（例如 USDC 收款地址被凍結、imdUSD v1 換成 v2）的唯一開關。設了但是空的（包括空字串、`0`、只有空白或逗號），或有一個地址格式錯，付費路線每次都回 500 `CONFIG_PAYMENT_TOKENS`（Swarm audit d1c83d3d：空字串以前會被當成沒設、開放所有代幣）。 |
+ | `PAID_TTL_SECONDS` | 120–900 的整數，預設 600 | 訂單從 prepare 到 deadline 的秒數。World 帳本最多接受 900。超出範圍回 500 `CONFIG_TTL`。 |
+ 
+-`PAYMENT_TOKENS` 在 prepare 和 approve 兩步都檢查：改掉之後，之前開的單（還沒過 deadline 的 ticket）和重送的 approve 都會被拒絕（`PAYMENT_TOKEN_UNAVAILABLE`），不會預扣 GOLD，也不會簽章。已經預扣的 GOLD 照常在 deadline 後由帳本退回。要讓舊 ticket 連 prepare 的結果都作廢，可以同時換 `TICKET_SECRET`（換了之後所有還沒 approve 的單都要重開）。
++`PAYMENT_TOKENS` 在 prepare 和 approve 兩步都檢查：改掉之後，之前開的單（還沒過 deadline 的 ticket）和重送的 approve 都會被拒絕（`PAYMENT_TOKEN_UNAVAILABLE`），不會預扣 GOLD，也不會簽章。要讓舊 ticket 連 prepare 的結果都作廢，可以同時換 `TICKET_SECRET`（換了之後所有還沒 approve 的單都要重開）。
++
++**`PAYMENT_TOKENS` 只停止開新單，收不回已經簽好的單**（Swarm audit d1c83d3d）：改之前已經 approve 成功的訂單，買家手上已經有簽章，在 deadline 前（最多 `PAID_TTL_SECONDS`，上限 900 秒）還是能用那個代幣 mint，帳本也會照常扣 GOLD。要立刻收回，只能在鏈上由 owner 對那張單呼叫 `revokePaidOrder(orderId)`，或 `setMintPaused(true)` 暫停全部 mint。只有 approve 的回應沒送到買家的訂單，才會在 deadline 後退回 GOLD。
++
++**只支援一般錢包（EOA）和 EIP-7702 錢包**（Swarm audit d1c83d3d）：GOLD 同意書是 ECDSA 簽章，必須還原成 `order.wallet` 本身。Safe 和 ERC-4337 智慧錢包的地址沒有自己的私鑰，approve 會回 `INVALID_GOLD_CONSENT`，不會預扣 GOLD；改填擁有者的地址也不行，因為鏈上 `mintPaid` 要求付款人就是訂單的錢包。Mint 頁要提示買家用一般錢包。
++
++**新增付款代幣之前**：代幣的 `Transfer` 事件必須是標準的 3 個 topic（from、to 進 topic，金額在 data）。World 帳本靠這筆 `Transfer`（訂單的代幣、從訂單錢包轉到收款地址、金額剛好等於登記表裡那個代幣的 `amount`）確認付款；不符合的代幣，所有訂單都會一直卡在預扣。imdUSD（OpenZeppelin ERC20）和 USDC（FiatToken）都符合。
++
++`CONTRACT_ADDRESS` 格式錯（少字、大小寫校驗錯、零地址）回 500 `CONFIG_CONTRACT_ADDRESS`，前後的空白和換行會先去掉。所有 500 的設定錯誤都會寫進 Worker 的 log（`approval config`）。
+ 
+ **測試**：`tests/paid.test.mjs` 有 4 項，用真實 R5 合約，在 chainId 11155111 的本機鏈上，搭配 World 帳本（`C:\EW-V2` 的副本，包含 9001）。涵蓋：
+ - 指定色和隨機都能 Mint，finalized 對帳後只扣一次 GOLD，EMBEO 確實被燒掉；
+diff --git a/Submission8/offchain/signer/free-approval.mjs b/Submission9/offchain/signer/free-approval.mjs
+index 7c1f257..66b9222 100644
+--- a/Submission8/offchain/signer/free-approval.mjs
++++ b/Submission9/offchain/signer/free-approval.mjs
+@@ -52,7 +52,9 @@ export class FreeApprovalSigner{
+   if(!Number.isSafeInteger(chainId)||chainId<1)fail('CONFIG_CHAIN_ID',500);
+   if(typeof metadataBase!=='string'||!/^(ipfs|ar|https):\/\/[^\s]{1,200}\/$/.test(metadataBase))fail('CONFIG_METADATA_BASE',500);
+   if(!Number.isSafeInteger(ttlSeconds)||ttlSeconds<60||ttlSeconds>900)fail('CONFIG_TTL',500);
+-  this.contractAddress=wallet(contractAddress);this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;
++  // the operator's address, not the buyer's: a configuration error (Swarm audit d1c83d3d finding 2)
++  try{this.contractAddress=wallet(contractAddress);}catch{fail('CONFIG_CONTRACT_ADDRESS',500);}
++  this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;
+   this.contract=new Contract(this.contractAddress,READ_ABI,provider);this.provider=provider;this.tree=tree??snapshotTree(snapshotWallets);
+   this.domain={name:DOMAIN_NAME,version:DOMAIN_VERSION,chainId,verifyingContract:this.contractAddress};
+  }
+diff --git a/Submission8/offchain/signer/paid-approval.mjs b/Submission9/offchain/signer/paid-approval.mjs
+index de7da2f..6c8d755 100644
+--- a/Submission8/offchain/signer/paid-approval.mjs
++++ b/Submission9/offchain/signer/paid-approval.mjs
+@@ -10,7 +10,12 @@
+ //           returns it with the mintPaid arguments, and allowedTokens lets the signer stop issuing orders for a token
+ //           that stays listed on chain for good. Swarm audit e9fc751f (2026-10-29): allowedTokens is checked in approve
+ //           too, so an order prepared before the token was excluded gets no hold and no signature, and a malformed
+-//           entry is a configuration error (CONFIG_PAYMENT_TOKENS, 500), not the buyer's WALLET_INVALID.
++//           entry is a configuration error (CONFIG_PAYMENT_TOKENS, 500), not the buyer's WALLET_INVALID. Swarm audit
++//           d1c83d3d (2026-10-29): a PAYMENT_TOKENS variable that is set but empty is that error too (it used to allow
++//           every token), and a bad CONTRACT_ADDRESS is CONFIG_CONTRACT_ADDRESS (500). The policy stops new orders only:
++//           an order approve already signed stays mintable until its deadline; owner revokePaidOrder is the recall.
++//           The consent is an ECDSA signature of order.wallet, so paid orders need an EOA or an EIP-7702 account (a Safe
++//           or an ERC-4337 account has no key for its own address and gets INVALID_GOLD_CONSENT before any hold).
+ //  approve: the ticket proves the order came from prepare; the World book holds goldCost after verifying the
+ //           wallet's consent (GenesisGold.reserve over the service binding); only a 'held' answer gets the R5
+ //           PaidAuthorization signature. Retrying approve with the same order is safe: the book answers from the stored
+@@ -38,6 +43,13 @@ const ORDER_KEYS=['orderId','wallet','lookKey','choice','uriHash','recipient','t
+ const fail=(code,status=409)=>{throw new ApprovalError(code,status);};
+ const enc=new TextEncoder();
+ const hexOf=buf=>'0x'+[...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
++/** The PAYMENT_TOKENS variable as the constructor's allowedTokens: undefined only when the variable is absent. A value
++ *  that is set but empty ("", "0", " , ") is an empty list, which the constructor refuses with CONFIG_PAYMENT_TOKENS
++ *  (Swarm audit d1c83d3d finding 1: a falsy value used to mean "every token"). */
++export function paymentTokensFromEnv(v){
++ if(v===undefined||v===null)return undefined;
++ return String(v).split(',').map(s=>s.trim()).filter(s=>s&&s!=='0');
++}
+ function wallet(v){if(typeof v!=='string'||!/^0x[0-9a-fA-F]{40}$/.test(v))fail('WALLET_INVALID',400);let a;try{a=getAddress(v);}catch{fail('WALLET_INVALID',400);}if(a===ZeroAddress)fail('WALLET_INVALID',400);return a;}
+ 
+ export class PaidApprovalSigner{
+@@ -52,7 +64,8 @@ export class PaidApprovalSigner{
+   if(!gold||typeof gold.reserve!=='function'||typeof deploymentId!=='string'||!deploymentId)fail('CONFIG_GOLD_BINDING',500);
+   if(allowedTokens!==undefined&&(!Array.isArray(allowedTokens)||!allowedTokens.length))fail('CONFIG_PAYMENT_TOKENS',500);
+   this.allowedTokens=allowedTokens?.map(t=>{try{return wallet(t).toLowerCase();}catch{fail('CONFIG_PAYMENT_TOKENS',500);}})??null;
+-  this.contractAddress=wallet(contractAddress);this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;
++  try{this.contractAddress=wallet(contractAddress);}catch{fail('CONFIG_CONTRACT_ADDRESS',500);}
++  this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;
+   this.gold=gold;this.deploymentId=deploymentId;this.provider=provider;this.contract=new Contract(this.contractAddress,PAID_READ_ABI,provider);
+   this.randomBytes=randomBytes??(n=>crypto.getRandomValues(new Uint8Array(n)));
+   this.domain={name:DOMAIN_NAME,version:DOMAIN_VERSION,chainId,verifyingContract:this.contractAddress};
+diff --git a/Submission8/offchain/signer/worker-entry.mjs b/Submission9/offchain/signer/worker-entry.mjs
+index 699febd..991a08e 100644
+--- a/Submission8/offchain/signer/worker-entry.mjs
++++ b/Submission9/offchain/signer/worker-entry.mjs
+@@ -9,7 +9,7 @@
+ // waits on I/O started by another request. Only pure data (the Merkle tree, the key) is kept between requests.
+ import {JsonRpcProvider,Wallet} from '../vendor/ethers.min.js';
+ import {FreeApprovalSigner,snapshotTree} from './free-approval.mjs';
+-import {PaidApprovalSigner} from './paid-approval.mjs';
++import {PaidApprovalSigner,paymentTokensFromEnv} from './paid-approval.mjs';
+ import {createHandler} from './worker.mjs';
+ import {revealChain,readyReveals} from './reveal-chain.mjs';
+ import snapshotWallets from './snapshot-wallets.json';
+@@ -18,24 +18,27 @@ let tree=null,key=null,chain=null;
+ // Secrets may arrive with a trailing newline (piped into `wrangler secret put` from a file or PowerShell).
+ const secret=v=>String(v??'').trim();
+ const provider=env=>new JsonRpcProvider(secret(env.RPC_URL),Number(env.CHAIN_ID),{staticNetwork:true});
++// Vars may carry spaces or a newline too (a dashboard paste); a malformed address is then CONFIG_CONTRACT_ADDRESS.
++const contractAddress=env=>String(env.CONTRACT_ADDRESS??'').trim();
+ function approver(env){
+  tree??=snapshotTree(snapshotWallets);key??=new Wallet(secret(env.SIGNER_PRIVATE_KEY));
+- return new FreeApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:env.CONTRACT_ADDRESS,signer:key,metadataBase:env.METADATA_BASE,tree,
++ return new FreeApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:contractAddress(env),signer:key,metadataBase:env.METADATA_BASE,tree,
+   ttlSeconds:Number(env.APPROVAL_TTL_SECONDS??300)});
+ }
+ function paidApprover(env){
+  if(!env.GOLD||!env.GOLD_DEPLOYMENT_ID||!env.TICKET_SECRET)return null;
+  key??=new Wallet(secret(env.SIGNER_PRIVATE_KEY));
+- return new PaidApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:env.CONTRACT_ADDRESS,signer:key,metadataBase:env.METADATA_BASE,
++ return new PaidApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:contractAddress(env),signer:key,metadataBase:env.METADATA_BASE,
+   gold:env.GOLD,deploymentId:env.GOLD_DEPLOYMENT_ID,ticketSecret:secret(env.TICKET_SECRET),ttlSeconds:Number(env.PAID_TTL_SECONDS??600),
+-  // PAYMENT_TOKENS (optional, comma-separated): the tokens this signer issues orders for (Genesis audit 944905c3)
+-  ...env.PAYMENT_TOKENS?{allowedTokens:String(env.PAYMENT_TOKENS).split(',').map(s=>s.trim()).filter(Boolean)}:{}});
++  // PAYMENT_TOKENS (optional, comma-separated): the tokens this signer issues orders for (Genesis audit 944905c3). Set
++  // but empty is a configuration error, never "every token" (Swarm audit d1c83d3d finding 1).
++  allowedTokens:paymentTokensFromEnv(env.PAYMENT_TOKENS)});
+ }
+ // The chain (2,048 hashes) is computed once per isolate; the secrets are only read through readyReveals.
+ function reveals(env){
+  if(!env.REVEAL_SEED)return null;
+  chain??=revealChain(secret(env.REVEAL_SEED));
+- return ()=>readyReveals({provider:provider(env),contractAddress:env.CONTRACT_ADDRESS,chain});
++ return ()=>readyReveals({provider:provider(env),contractAddress:contractAddress(env),chain});
+ }
+ let handler=null;
+ export default {fetch(request,env){
+diff --git a/Submission8/offchain/signer/worker.mjs b/Submission9/offchain/signer/worker.mjs
+index 553f66e..77936fc 100644
+--- a/Submission8/offchain/signer/worker.mjs
++++ b/Submission9/offchain/signer/worker.mjs
+@@ -88,7 +88,11 @@ export function createHandler({approver,paidApprover=null,reveals=null,allowedOr
+    }
+    return reply(200,{ok:true,...result},origin);
+   }catch(e){
+-   if(e instanceof ApprovalError||e instanceof RevealError)return error(e.status,e.code,origin);
++   if(e instanceof ApprovalError||e instanceof RevealError){
++    // a 5xx code is the operator's configuration, not the buyer's request: log it (Swarm audit d1c83d3d finding 2)
++    if(e.status>=500)console.error('approval config',e.code);
++    return error(e.status,e.code,origin);
++   }
+    console.error('approval failed',e?.message);
+    return error(500,'INTERNAL_ERROR',origin);
+   }
+diff --git a/Submission8/tests/gold-book/genesis-gold.test.mjs b/Submission9/tests/gold-book/genesis-gold.test.mjs
+index db44fed..bff691d 100644
+--- a/Submission8/tests/gold-book/genesis-gold.test.mjs
++++ b/Submission9/tests/gold-book/genesis-gold.test.mjs
+@@ -15,7 +15,9 @@ const SAFE='0x29e7c208481f648795f677b55f6ecb2badc2f01e',DEAD='0x0000000000000000
+ const CODE='0x6080604052',CODE_HASH=keccak256(CODE),CONTRACT='0x'+'c'.repeat(40),EMBEO='300000000000000000000000';
+ // IMD stands for imdUSD v1 (the deployment's token, GOLD 8 for 1,200), USDC for the added token (GOLD 9 for 1,600)
+ const IMD='0x'+'a1'.repeat(20),USDC='0x'+'b2'.repeat(20),V2='0x'+'d3'.repeat(20);
+-const DEP={id:'sepolia-r5-test-1',environment:'sepolia',chainId:11155111,contract:CONTRACT,codeHash:CODE_HASH,deployBlock:'100',embeoCost:EMBEO,paymentToken:IMD,goldCost:'8',addedTokens:[{token:USDC,goldCost:'9'}],signer:'0x'+'5'.repeat(40),domainVersion:'7',recipient:SAFE};
++// what mintPaid charges: 20 imdUSD (18 decimals), 20 USDC (6 decimals)
++const A18='20000000000000000000',A6='20000000';
++const DEP={id:'sepolia-r5-test-1',environment:'sepolia',chainId:11155111,contract:CONTRACT,codeHash:CODE_HASH,deployBlock:'100',embeoCost:EMBEO,paymentToken:IMD,goldCost:'8',paymentAmount:A18,addedTokens:[{token:USDC,goldCost:'9',amount:A6}],signer:'0x'+'5'.repeat(40),domainVersion:'7',recipient:SAFE};
+ const LIST=[DEP,{...DEP,id:'mainnet-other',environment:'production',chainId:1}];
+ const DEADLINE=NOW/1000+300;
+ const order=(patch={})=>({orderId:H(0xabc),wallet:W,lookKey:H(0x1001),choice:1,uriHash:keccak256(toHex('ipfs://looks/x/1')),recipient:SAFE,token:IMD,embeoCost:EMBEO,goldCost:'8',deadline:String(DEADLINE),signerEpoch:'1',...patch});
+@@ -120,7 +122,7 @@ test('closed mint control, missing GOLD and the empty production registry all re
+ // A JSON-RPC stand-in for one chain: logs and receipts are encoded the way the R5 contract emits them.
+ const pad=v=>'0x'+BigInt(v).toString(16).padStart(64,'0');
+ const word=v=>BigInt(v).toString(16).padStart(64,'0');
+-function chain({tokenId=0n,revoked=false,finalTime=NOW/1000,code=CODE,minted={},consumed={},chainId=11155111,fail=null,receiptTo=CONTRACT,otherMints=[],finNumber=200,blockOfTx=150,timeOf=null,receiptBlockHash=H(0xb0),logList=null,payment=[IMD,W,SAFE]}={}){
++function chain({tokenId=0n,revoked=false,finalTime=NOW/1000,code=CODE,minted={},consumed={},chainId=11155111,fail=null,receiptTo=CONTRACT,otherMints=[],finNumber=200,blockOfTx=150,timeOf=null,receiptBlockHash=H(0xb0),logList=null,payment=[IMD,W,SAFE],extraPayments=[]}={}){
+  const o=order(),tx=H(0x7777),fin={number:'0x'+finNumber.toString(16),hash:H(0xf1),timestamp:'0x'+finalTime.toString(16)};
+  const ts=n=>timeOf?timeOf(n):finalTime-12*(finNumber-n);
+  const logRanges=[];
+@@ -129,8 +131,10 @@ function chain({tokenId=0n,revoked=false,finalTime=NOW/1000,code=CODE,minted={},
+   data:'0x'+word(minted.choice??o.choice)+word(minted.skin??1)+word(minted.paid??1)+word(minted.cost??EMBEO)};
+  // other tokens minted in the same transaction (a batch or a bundle): [wallet, tokenId]
+  const others=otherMints.map(([w,id])=>({address:CONTRACT,removed:false,transactionHash:tx,topics:[R5_TOPICS.minted,pad(w),pad(id),o.lookKey],data:'0x'+word(0)+word(0)+word(0)+word(0)}));
+- // the payment mintPaid pulls: Transfer(wallet -> recipient) emitted by the token, [token, from, to]; null: none
+- const paymentLog=payment&&{address:payment[0],removed:false,transactionHash:tx,topics:[keccak256(toHex('Transfer(address,address,uint256)')),pad(payment[1]),pad(payment[2])],data:'0x'+word(20n*10n**18n)};
++ // the payment mintPaid pulls: Transfer(wallet -> recipient) emitted by the token, [token, from, to, amount]; null: none.
++ // extraPayments: other Transfers in the same receipt (a batch the wallet runs next to the mint)
++ const transferLog=([token,from,to,amount=token===USDC?A6:A18])=>({address:token,removed:false,transactionHash:tx,topics:[keccak256(toHex('Transfer(address,address,uint256)')),pad(from),pad(to)],data:'0x'+word(amount)});
++ const paymentLogs=[...payment?[payment]:[],...extraPayments].map(transferLog);
+  const calls=[];
+  const rpc=async(method,params)=>{calls.push(method);if(fail===method)throw Error('MINT_CHAIN_UNAVAILABLE');
+   switch(method){
+@@ -143,7 +147,7 @@ function chain({tokenId=0n,revoked=false,finalTime=NOW/1000,code=CODE,minted={},
+     const q=params[0],from=Number(q.fromBlock),to=Number(q.toBlock);logRanges.push([from,to]);
+     const match=q.address===CONTRACT&&q.topics?.length===2&&q.topics[0]===R5_TOPICS.consumed&&q.topics[1]===o.orderId;
+     return match&&tokenId&&from<=blockOfTx&&blockOfTx<=to?logList??[consumedLog]:[];}
+-   case 'eth_getTransactionReceipt':return {transactionHash:tx,status:'0x1',to:receiptTo,blockNumber:'0x'+blockOfTx.toString(16),blockHash:receiptBlockHash,logs:[...paymentLog?[paymentLog]:[],...others,mintedLog,consumedLog]};
++   case 'eth_getTransactionReceipt':return {transactionHash:tx,status:'0x1',to:receiptTo,blockNumber:'0x'+blockOfTx.toString(16),blockHash:receiptBlockHash,logs:[...paymentLogs,...others,mintedLog,consumedLog]};
+   }throw Error('unexpected '+method);};
+  return {rpc,calls,logRanges,consumedLog};
+ }
+@@ -383,7 +387,7 @@ test('Genesis audit 944905c3 finding 1: the order names its token and is held on
+   const imd=order({orderId:H(0xada)}),usdc=order({orderId:H(0xada),token:USDC,goldCost:'9'});
+   await codeOf(reserve(f,{deploymentId:DEP.id,order:usdc,consentSignature:await consent(imd)}),'INVALID_GOLD_CONSENT');
+   // v2 listed later at imdUSD's price is held in its own name, and the stored order records the token
+-  const LATER=[{...DEP,addedTokens:[...DEP.addedTokens,{token:V2,goldCost:'8'}]}];
++  const LATER=[{...DEP,addedTokens:[...DEP.addedTokens,{token:V2,goldCost:'8',amount:A18}]}];
+   const v2=order({orderId:H(0xadb),token:V2});
+   const held=await reserveGenesisGold(f.db,LATER,'sepolia',{deploymentId:DEP.id,order:v2,consentSignature:await consent(v2)},NOW,()=>NOW);
+   assert.equal(held.state,'held');
+@@ -395,7 +399,7 @@ test('World audit 8febfeed finding 4: an identical retry is answered from the st
+  const f=await setup();try{
+   const o=order({token:USDC,goldCost:'9'}),req={deploymentId:DEP.id,order:o,consentSignature:await consent(o)};
+   const a=await reserve(f,req);assert.equal(a.state,'held');
+-  for(const addedTokens of [[],[{token:USDC,goldCost:'10'}]]){
++  for(const addedTokens of [[],[{token:USDC,goldCost:'10',amount:A6}]]){
+    const edited=[{...DEP,addedTokens}];
+    assert.deepEqual(await reserveGenesisGold(f.db,edited,'sepolia',req,NOW,()=>NOW),a);
+   }
+@@ -404,9 +408,13 @@ test('World audit 8febfeed finding 4: an identical retry is answered from the st
+   assert.equal((await f.snapshot()).reserved,'9');
+  }finally{f.close();}
+ });
+-test('owner 2026-10-29: a registry entry lists at most two added tokens, each a distinct token other than paymentToken with a positive GOLD price; a malformed list refuses the entry',async()=>{
++test('owner 2026-10-29: a registry entry lists at most two added tokens, each a distinct token other than paymentToken with a positive GOLD price and amount; a malformed list refuses the entry',async()=>{
+  const f=await setup();try{
+-  const t=(token,goldCost)=>({token,goldCost});
++  const t=(token,goldCost,amount=A6)=>({token,goldCost,amount});
++  // World audit 93dae57f finding 1: every token names the exact amount mintPaid charges
++  for(const bad of [{...DEP,paymentAmount:undefined},{...DEP,paymentAmount:'0'},{...DEP,paymentAmount:'020'},{...DEP,paymentAmount:20},
++   {...DEP,addedTokens:[{token:USDC,goldCost:'9'}]},{...DEP,addedTokens:[t(USDC,'9','0')]},{...DEP,addedTokens:[t(USDC,'9','2e7')]}])
++   await codeOf(reserveGenesisGold(f.db,[bad],'sepolia',await request(),NOW,()=>NOW),'MINT_DEPLOYMENT_INVALID');
+   for(const [addedTokens,paymentToken=IMD] of [[undefined],['9'],[[t(USDC,'0')]],[[t(USDC,'9'),t(V2,'8'),t('0x'+'e4'.repeat(20),'8')]],
+    [[t(USDC,'9'),t(USDC.toUpperCase().replace('0X','0x'),'8')]],[[t(IMD,'8')]],[[t('0x12','9')]],[[t(USDC,'09')]],[[t(USDC,9)]],[[{...t(USDC,'9'),extra:1}]],[[],'0x12']]){
+    const bad={...DEP,addedTokens,paymentToken};
+@@ -477,7 +485,7 @@ test('World audit e3e9b712 finding 5: a retry of a held order needs the wallet
+   await codeOf(reserve(f,{...req,consentSignature:await consent(o,other)}),'INVALID_GOLD_CONSENT');
+   await codeOf(reserve(f,{...req,consentSignature:'0x'+'1'.repeat(130)}),'INVALID_GOLD_CONSENT');
+   const NEW_SAFE='0x'+'7'.repeat(40);
+-  const wider=[{...DEP,goldCost:'9',recipient:NEW_SAFE,addedTokens:[{token:USDC,goldCost:'9'},{token:V2,goldCost:'8'}]}];
++  const wider=[{...DEP,goldCost:'9',recipient:NEW_SAFE,addedTokens:[{token:USDC,goldCost:'9',amount:A6},{token:V2,goldCost:'8',amount:A18}]}];
+   const changed=[{token:USDC,goldCost:'9'},{token:V2},{goldCost:'9'},{recipient:NEW_SAFE},{wallet:other.address.toLowerCase()}];
+   for(const patch of changed){
+    const c=order(patch),signer=patch.wallet?other:account;
+@@ -488,3 +496,24 @@ test('World audit e3e9b712 finding 5: a retry of a held order needs the wallet
+   assert.deepEqual(await reserve(f,req),held);
+  }finally{f.close();}
+ });
++test('World audit 93dae57f finding 1: the payment Transfer must carry the exact amount the registry lists for the order’s token',async()=>{
++ const f=await setup();try{
++  await reserve(f,await request());
++  // paid in V2 (same GOLD price) with a 0, 1-wei or USDC-sized Transfer of the hold's imdUSD v1 batched next to it
++  for(const amount of ['0','1',A6,String(BigInt(A18)+1n)]){
++   const r=await settle(f,chain({tokenId:7n,payment:[V2,W,SAFE],extraPayments:[[IMD,W,SAFE,amount]]}));
++   assert.deepEqual([r.state,r.code],['held','MINT_PROOF_CONFLICT'],amount);
++  }
++  assert.equal((await f.snapshot()).reserved,'8');
++  const r=await settle(f,chain({tokenId:7n,payment:[IMD,W,SAFE,A18]}));assert.equal(r.state,'consumed');
++ }finally{f.close();}
++});
++test('World audit 93dae57f finding 2: a code-hash mismatch is fetched and hashed once per finalized block, not once per order',async()=>{
++ const n=GENESIS_CRON_PAGE,f=await setup({topups:n});try{
++  for(let i=0;i<n;i++){const o=order({orderId:H(0x600+i)});await reserve(f,{deploymentId:DEP.id,order:o,consentSignature:await consent(o)});}
++  const c=chain({code:'0x60aa'}),out=await reconcileGenesisDeployments(f.db,LIST,'sepolia',(d,h)=>createGenesisR5Reader(d,c.rpc,h),NOW);
++  assert.deepEqual(out[0].outcomes.map(o=>o.status),Array(n).fill('MINT_SCOPE_MISMATCH'));
++  assert.equal(c.calls.filter(m=>m==='eth_getCode').length,1);
++  assert.equal((await f.snapshot()).reserved,String(8*n));
++ }finally{f.close();}
++});
+diff --git a/Submission8/tests/signer/paid.test.mjs b/Submission9/tests/signer/paid.test.mjs
+index cd16bcb..9b25a84 100644
+--- a/Submission8/tests/signer/paid.test.mjs
++++ b/Submission9/tests/signer/paid.test.mjs
+@@ -7,7 +7,8 @@ import {existsSync,readFileSync} from 'node:fs';
+ import {fileURLToPath} from 'node:url';
+ import {harness,TX} from '../../contract/tests/hardening-harness.mjs';
+ import {ethers} from '../../contract/tools/runtime.mjs';
+-import {PaidApprovalSigner} from '../paid-approval.mjs';
++import {PaidApprovalSigner,paymentTokensFromEnv} from '../paid-approval.mjs';
++import {FreeApprovalSigner} from '../free-approval.mjs';
+ import {createHandler} from '../worker.mjs';
+ 
+ // The World copy: WORLD_SOURCE, else the original handoff copy, else the GOLD work copy made on D: after the C: drive
+@@ -33,7 +34,9 @@ async function setup(grantGold=3,addedTokens=[]){
+  const db=openD1();db.raw.exec(readFileSync(new URL('migrations-sepolia/9001_sepolia_test_gold.sql',WORLD),'utf8'));
+  const contract=h.contract.target.toLowerCase();
+  const dep={id:'sepolia-r5-rehearsal-1',environment:'sepolia',chainId:SEPOLIA,contract,codeHash:ethers.keccak256(await h.provider.getCode(contract)),
+-  deployBlock:String(await h.contract.startBlock()),embeoCost:String(await h.contract.paidCost()),paymentToken:h.token.target.toLowerCase(),goldCost:String(await h.contract.paidGoldCost()),signer:h.approvalSigner.address,
++  deployBlock:String(await h.contract.startBlock()),embeoCost:String(await h.contract.paidCost()),paymentToken:h.token.target.toLowerCase(),goldCost:String(await h.contract.paidGoldCost()),
++  // the exact amount mintPaid charges, read back like a production entry: paymentTokens(token) low 128 bits (World audit 93dae57f)
++  paymentAmount:String((await h.contract.paymentTokens(h.token.target))&((1n<<128n)-1n)),signer:h.approvalSigner.address,
+   recipient:(await h.contract.paymentRecipient()).toLowerCase(),domainVersion:'7',addedTokens};
+  let nowMs=0;const sync=async()=>{nowMs=Number((await h.provider.getBlock('latest')).timestamp)*1000;};await sync();
+  db.raw.exec(buildSeedSql({batch:'rehearsal-1',source:'paid route end-to-end test',wallets:[{wallet:h.a,cap:100,note:'test wallet alice'}],grants:[{wallet:h.a,amount:grantGold}]},nowMs));
+@@ -113,7 +116,7 @@ test('owner 2026-10-29: a paid mint paid in an added token (USDC, 6 decimals) at
+  // the fixture's imdUSD GOLD price is 1; USDC's is 2 (mainnet: 1,200 and 1,600)
+  const f=await setup(3);try{
+   const usdc=await f.h.deploy('contracts/test/Fixtures.sol:DecimalsToken',[f.h.a,6]);
+-  f.dep.addedTokens.push({token:usdc.target.toLowerCase(),goldCost:'2'});   // the registry entry lists USDC at its GOLD price
++  f.dep.addedTokens.push({token:usdc.target.toLowerCase(),goldCost:'2',amount:String((await f.h.contract.paidCost())/10n**12n)});   // USDC at its GOLD price and amount
+   assert.equal(await f.h.contract.paidGoldCost(),1n);
+   await f.h.mine(f.h.contract.addPaymentToken(usdc.target,2n,TX));
+   await f.h.rpc.request({method:'evm_increaseTime',params:[2*24*3600]});await f.h.rpc.request({method:'evm_mine',params:[]});
+@@ -160,6 +163,27 @@ test('owner 2026-10-29: the order holds the GOLD price of the chosen token, and
+   for(const bad of [[h.token.target,'0xabc'],[h.token.target,'0x'+'0'.repeat(40)]])
+    assert.throws(()=>new PaidApprovalSigner({provider:h.provider,contractAddress:h.contract.target,chainId:SEPOLIA,signer:h.approvalSigner,metadataBase:BASE,
+     gold,deploymentId:'stub',ticketSecret:'rehearsal-ticket-secret-0123456789abcdef',allowedTokens:bad}),e=>e.code==='CONFIG_PAYMENT_TOKENS'&&e.status===500);
++  // Swarm audit d1c83d3d finding 1: PAYMENT_TOKENS set but empty is a configuration error, never "every token"
++  const fromEnv=v=>new PaidApprovalSigner({provider:h.provider,contractAddress:h.contract.target,chainId:SEPOLIA,signer:h.approvalSigner,metadataBase:BASE,
++   gold,deploymentId:'stub',ticketSecret:'rehearsal-ticket-secret-0123456789abcdef',allowedTokens:paymentTokensFromEnv(v)});
++  for(const v of ['',0,'0',' ',',',' , ','\n'])assert.throws(()=>fromEnv(v),e=>e.code==='CONFIG_PAYMENT_TOKENS'&&e.status===500,JSON.stringify(v));
++  for(const v of [undefined,null])assert.equal(fromEnv(v).allowedTokens,null);
++  assert.deepEqual(fromEnv(' '+h.token.target+' ,').allowedTokens,[h.token.target.toLowerCase()]);
++  // finding 2: a bad CONTRACT_ADDRESS is the operator's configuration (500), in both signers, not the buyer's WALLET_INVALID
++  for(const addr of ['0xabc','0x'+'0'.repeat(40),h.contract.target+'\n',h.contract.target.replace(/[A-F]/,c=>c.toLowerCase())]){
++   assert.throws(()=>new PaidApprovalSigner({provider:h.provider,contractAddress:addr,chainId:SEPOLIA,signer:h.approvalSigner,metadataBase:BASE,
++    gold,deploymentId:'stub',ticketSecret:'rehearsal-ticket-secret-0123456789abcdef'}),e=>e.code==='CONFIG_CONTRACT_ADDRESS'&&e.status===500,addr);
++   assert.throws(()=>new FreeApprovalSigner({provider:h.provider,contractAddress:addr,chainId:SEPOLIA,signer:h.approvalSigner,metadataBase:BASE,tree:{}}),
++    e=>e.code==='CONFIG_CONTRACT_ADDRESS'&&e.status===500,addr);
++  }
++  // and the Worker logs a configuration error instead of only answering the buyer with it
++  const logged=[],orig=console.error;console.error=(...a)=>logged.push(a.join(' '));
++  try{
++   const ORIGIN='https://mint.example.test',bad=createHandler({approver:async()=>fromEnv(''),allowedOrigins:[ORIGIN]});
++   const r=await bad(new Request('https://signer.example.test/v1/eligibility',{method:'POST',headers:{'Content-Type':'application/json',Origin:ORIGIN},body:'{}'}));
++   assert.deepEqual([r.status,(await r.json()).error.code],[500,'CONFIG_PAYMENT_TOKENS']);
++  }finally{console.error=orig;}
++  assert.deepEqual(logged,['approval config CONFIG_PAYMENT_TOKENS']);
+   const imd=await ask(h.token.target,look({hat:'HAT_BERET.beret'})),dollar=await ask(usdc.target,look({hat:'HAT_PEAKED.captain'}));
+   assert.deepEqual([imd.p.order.goldCost,imd.p.payment.goldCost,imd.p.payment.amount],[String(await h.contract.paidGoldCost()),String(await h.contract.paidGoldCost()),String(await h.contract.paidCost())]);
+   assert.deepEqual([dollar.p.order.goldCost,dollar.p.payment.goldCost,dollar.p.payment.amount],[String(USDC_GOLD),String(USDC_GOLD),String((await h.contract.paidCost())/10n**12n)]);
