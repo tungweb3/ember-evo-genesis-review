@@ -1,0 +1,49 @@
+--- Submission6/contracts/EmberEvoGenesisCandidate.sol
++++ Submission7/contracts/EmberEvoGenesisCandidate.sol
+@@ -63,6 +63,10 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+ ///      1,200 GOLD = paidGoldCost; USDC 1,600 GOLD, set when it is added). mintPaid takes the GOLD price of the token
+ ///      actually paid, checks the signed PaidAuthorization against it and reports it in PaidOrderConsumed, so an order
+ ///      reserved at the discounted price cannot be paid in a token with a higher GOLD price.
++///      Swarm audit 2026-10-29 (job 944905c3): the PaidAuthorization names the token, so an order prepared for one token
++///      cannot be paid in another even at the same GOLD price (imdUSD v1 and v2), and the signer can stop issuing orders
++///      for a listed token by policy (entries stay on chain for good). Events do not name the token: GenesisMinted.cost
++///      is the dollar price in 18 decimals and the token that paid is the one in the same receipt's Transfer log.
+ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     using SafeERC20 for IERC20;
+     /// configureSupply can never go above this (guards against a mistyped number; owner decision 2026-10-22).
+@@ -99,7 +103,7 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     /// the call and this contract's own values (caller, recipient, costs, signer epoch), so only orderId and deadline
+     /// travel in calldata (gas review 2026-10-28). embeoCost is paidCost, the dollar price in 18 decimals, whichever token
+     /// pays (named before imdUSD; 20e18 also when 20 USDC = 20e6 is paid); goldCost is the GOLD price of the token paid.
+-    bytes32 private constant PAID_AUTH_TYPEHASH = keccak256("PaidAuthorization(bytes32 orderId,address wallet,bytes32 lookKey,uint8 choice,bytes32 uriHash,address recipient,uint256 embeoCost,uint256 goldCost,uint256 deadline,uint256 signerEpoch)");
++    bytes32 private constant PAID_AUTH_TYPEHASH = keccak256("PaidAuthorization(bytes32 orderId,address wallet,bytes32 lookKey,uint8 choice,bytes32 uriHash,address recipient,address token,uint256 embeoCost,uint256 goldCost,uint256 deadline,uint256 signerEpoch)");
+     /// The free route's approval. `paid` is always false here: the paid route has its own PaidAuthorization (since
+     /// 2026-10-28 mintPaid verifies only that), so a free approval can never pay for a paid mint or the other way round.
+     bytes32 private constant APPEARANCE_TYPEHASH = keccak256("Appearance(address wallet,bytes32 lookKey,uint8 choice,bytes32 uriHash,uint256 deadline,uint256 signerEpoch,bool paid)");
+@@ -417,6 +421,8 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         uint256 amount = paidCost / unit;
+         require((decimals == 6 || decimals == 18) && amount * unit == paidCost && goldCost != 0 && goldCost >> 88 == 0, "TOKEN_IDENTITY_REQUIRED");
+         uint256 usableAt = block.timestamp + PAYMENT_TOKEN_DELAY;
++        // usableAt fills bits 216-255 (Swarm audit 944905c3 finding 5: never truncated, even after the year 36812)
++        require(usableAt >> 40 == 0, "PARAMETERS_REQUIRED");
+         ++extraPaymentTokenCount;
+         paymentTokens[token] = usableAt << 216 | goldCost << 128 | amount;
+         emit PaymentTokenAdded(token, amount, goldCost, usableAt);
+@@ -599,7 +605,7 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         assembly ("memory-safe") { tstore(slot, 1) }
+     }
+     /// One paid token per caller per transaction; future transactions have no per-wallet total limit. The signer's
+-    /// PaidAuthorization is checked against the call and this contract's own values (wallet = caller, recipient, both
++    /// PaidAuthorization is checked against the call and this contract's own values (wallet = caller, recipient, the token paid, both
+     /// costs (the GOLD cost of the token paid), signer epoch), so an order signed for anything else fails the signature check (gas review 2026-10-28: one
+     /// signature instead of two, no order struct in calldata). token: paymentToken, or a usable added token (2026-10-29).
+     function mintPaid(bytes32 lookKey, uint8 choice, string calldata uri, bytes32 orderId, uint256 deadline, bytes calldata goldSignature, bytes32[] calldata reveals, IERC20 token) external nonReentrant {
+@@ -617,7 +623,7 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+         uint256 epoch = signerEpoch;
+         address recipient = paymentRecipient;
+         uint256 cost = paidCost;
+-        bytes32 goldDigest = _hashTypedDataV4(keccak256(abi.encode(PAID_AUTH_TYPEHASH, orderId, msg.sender, lookKey, choice, keccak256(bytes(uri)), recipient, cost, gold, deadline, epoch)));
++        bytes32 goldDigest = _hashTypedDataV4(keccak256(abi.encode(PAID_AUTH_TYPEHASH, orderId, msg.sender, lookKey, choice, keccak256(bytes(uri)), recipient, token, cost, gold, deadline, epoch)));
+         require(SignatureChecker.isValidSignatureNow(signer, goldDigest, goldSignature), "GOLD_RESERVATION_AUTHORITY");
+         _claimPaidTransaction();
+         // Off-chain GOLD was reserved before this authorization was signed.
