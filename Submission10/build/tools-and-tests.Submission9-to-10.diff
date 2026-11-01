@@ -1,0 +1,209 @@
+--- Submission9/tests/contract/concurrent.test.mjs
++++ Submission10/tests/contract/concurrent.test.mjs
+@@ -62,8 +62,9 @@ test('R4: fee-on-transfer token rejects entire payment and order consumption',as
+  const h=await harness('FeeToken');try{await h.configure([]);await h.mine(h.token.connect(h.alice).approve(h.contract.target,COST,TX));const p=await h.approval(h.a,'tax'),args=await h.paidArgs(p),before=await h.token.balanceOf(h.a);await assert.rejects(h.mine(h.contract.connect(h.alice).mintPaid(...args,TX)));assert.equal(await h.token.balanceOf(h.a),before);assert.equal(await h.contract.paidOrderTokenId(args[3]),0n);assert.equal(await h.contract.totalMinted(),0n);
+  }finally{await h.close();}
+ });
+-test('R4: public-chain constructor rejected and candidate ABI has no test supply/admin mint',async()=>{
+- await assert.rejects(harness('FixtureToken','EmberEvoGenesisCandidate',1));const abi=artifacts['contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate'].abi;assert.ok(!abi.some(v=>/seed|adminMint|freeDeadline|FREE_WINDOW/.test(v.name??'')));
++// 2026-11-01: the mainnet guard is removed for the mainnet deployment, so the constructor now succeeds on chainId 1.
++test('R4: constructor deploys on chainId 1 (mainnet guard removed 2026-11-01) and candidate ABI has no test supply/admin mint',async()=>{
++ {const h=await harness('FixtureToken','EmberEvoGenesisCandidate',1);try{assert.equal(await h.contract.maxSupply(),1688n);}finally{await h.close();}}const abi=artifacts['contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate'].abi;assert.ok(!abi.some(v=>/seed|adminMint|freeDeadline|FREE_WINDOW/.test(v.name??'')));
+ });
+ test('R4: free/paid transactions competing in one block can consume only the last shared slot',async()=>{
+  for(const paidFirst of [true,false]){const h=await harness('FixtureToken','SupplyBoundaryHarness');try{
+
+--- Submission9/tests/contract/deploy-testnet.test.mjs
++++ Submission10/tests/contract/deploy-testnet.test.mjs
+@@ -47,24 +47,26 @@ test('rehearsal deploy on a simulated Sepolia chain, then a signed free mint and
+  }finally{await rpc.disconnect();}
+ });
+ 
+-test('mainnet is refused by the script and by the contract itself',async()=>{
++test('the rehearsal script refuses mainnet; the contract itself deploys there since the guard was removed (2026-11-01)',async()=>{
+  const {rpc,provider}=await chain(1);try{
+   const deployer=await provider.getSigner(0);
+   await assert.rejects(deployRehearsal({deployer,signerAddress:testAuthority(1).address,snapshotWallets:[await deployer.getAddress()],
+    pendingURI:'ipfs://x/p',metadataBase:'ipfs://x/',paidCost:1n}),/MAINNET_REFUSED/);
+   const token=await new ethers.ContractFactory(artifacts['contracts/test/Fixtures.sol:FixtureToken'].abi,artifacts['contracts/test/Fixtures.sol:FixtureToken'].bytecode,deployer).deploy(await deployer.getAddress());
+   const f=new ethers.ContractFactory(artifacts[GENESIS].abi,artifacts[GENESIS].bytecode,deployer);
+-  await assert.rejects(f.getDeployTransaction(await deployer.getAddress(),await token.getAddress(),testAuthority(1).address,RECIPIENT,1n,1n,'X').then(tx=>provider.call({...tx,from:deployer.address})),/MAINNET_NOT_REVIEWED/);
++  const g=await f.deploy(await deployer.getAddress(),await token.getAddress(),testAuthority(1).address,RECIPIENT,1n,1n,'X');await g.waitForDeployment();assert.equal(await g.paymentRecipient(),RECIPIENT);
+  }finally{await rpc.disconnect();}
+ });
+ 
+ // Review 2026-10-29: the registry entry the deploy tool prints must have the World book's shape, or the book refuses
+ // every paid order of the deployment (MINT_DEPLOYMENT_INVALID).
+ test('the GOLD book registry entry printed after a deploy has every field the World book requires',()=>{
+- const d={chainId:SEPOLIA,contract:'0x'+'Ab'.repeat(20),metadataBase:'ipfs://X/',paidRoute:'open',codeHash:'0x'+'1'.repeat(64),startBlock:7,
+-  paidCost:'20000000000000000000',goldCost:'1200',signer:'0x'+'2'.repeat(40),recipient:'0x'+'C'.repeat(40)};
++ const d={chainId:SEPOLIA,contract:'0x'+'Ab'.repeat(20),metadataBase:'ipfs://X/',paidRoute:'open',codeHash:'0x'+'1'.repeat(64),startBlock:7,token:'0x'+'3'.repeat(40),
++  paymentTokens:[{token:'0x'+'3'.repeat(40),amount:'20000000000000000000',goldCost:'1200'},{token:'0x'+'4'.repeat(40),amount:'20000000',goldCost:'1600'}],
++  paidCost:'20000000000000000000',goldCost:'1200',signer:'0x'+'2'.repeat(40),recipient:'0x'+'C'.repeat(40),domainVersion:'7'};
+  const r=followUp(d).goldBookRegistry;
+- assert.deepEqual(Object.keys(r).sort(),['addedTokenGoldCosts','chainId','codeHash','contract','deployBlock','domainVersion','embeoCost','environment','goldCost','id','recipient','signer']);
+- assert.deepEqual(r.addedTokenGoldCosts,[]);assert.equal(r.contract,d.contract.toLowerCase());assert.equal(r.recipient,d.recipient.toLowerCase());
+- assert.equal(r.goldCost,'1200');assert.equal(r.domainVersion,'7');
++ // World 7d09bda: every token with its GOLD price and exact amount (2026-11-01: updated from the pre-7d09bda shape)
++ assert.deepEqual(Object.keys(r).sort(),['addedTokens','chainId','codeHash','contract','deployBlock','domainVersion','embeoCost','environment','goldCost','id','paymentAmount','paymentToken','recipient','signer']);
++ assert.deepEqual(r.addedTokens,[{token:'0x'+'4'.repeat(40),goldCost:'1600',amount:'20000000'}]);assert.equal(r.contract,d.contract.toLowerCase());assert.equal(r.recipient,d.recipient.toLowerCase());
++ assert.equal(r.goldCost,'1200');assert.equal(r.paymentAmount,'20000000000000000000');assert.equal(r.domainVersion,'7');
+ });
+
+--- Submission9/tools/deploy-testnet.mjs
++++ Submission10/tools/deploy-testnet.mjs
+@@ -7,7 +7,10 @@
+ //     PAYMENT_RECIPIENT (where every paid mint's payment goes: the treasury Safe, owner 2026-10-28)
+ //     optional: PAID_COST (whole tokens, default 20), GOLD_COST (default 1200), SYMBOL (default tEEVO),
+ //               PAYMENT_TOKEN (else a TestUSD is deployed), START_DELAY_SECONDS (default 600),
+-//               OPEN_PAID=1 (also call approvePaidPrice: the paid rehearsal), TOKEN_RECIPIENTS (comma list: 1,000 tUSD each)
++//               OPEN_PAID=1 (also call approvePaidPrice: the paid rehearsal), TOKEN_RECIPIENTS (comma list: 1,000 tUSD
++//               and 1,000 tUSDC each), USDC_GOLD_COST (default 1600: a TestUSDC, 6 decimals, is deployed with the TestUSD
++//               and added with addPaymentToken at this GOLD price; it is usable two days later, PAYMENT_TOKEN_DELAY;
++//               0 skips it. Submission9 rehearsal, 2026-10-29)
+ import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+ import {fileURLToPath} from 'node:url';
+ import {resolve} from 'node:path';
+@@ -16,10 +19,11 @@ import {snapshotTree} from '../../signer/free-approval.mjs';
+ import {revealChain,signRevealCommit} from '../../signer/reveal-chain.mjs';
+ 
+ const artifacts=JSON.parse(readFileSync(new URL('../artifacts/test-artifacts.private.json',import.meta.url),'utf8'));
+-export const GENESIS='contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate',TEST_USD='contracts/testnet/TestUSD.sol:TestUSD';
++export const GENESIS='contracts/EmberEvoGenesisCandidate.sol:EmberEvoGenesisCandidate',TEST_USD='contracts/testnet/TestUSD.sol:TestUSD',TEST_USDC='contracts/testnet/TestUSDC.sol:TestUSDC';
++const LOW128=(1n<<128n)-1n;
+ export const SEPOLIA=11155111;
+ 
+-export async function deployRehearsal({deployer,signerAddress,revealSigner,snapshotWallets,pendingURI,metadataBase,revealCommit,recipient,paidCost,goldCost=1n,symbol='tEEVO',startDelay=600,tokenAddress=null,openPaid=false,tokenRecipients=[],log=()=>{}}){
++export async function deployRehearsal({deployer,signerAddress,revealSigner,snapshotWallets,pendingURI,metadataBase,revealCommit,recipient,paidCost,goldCost=1n,symbol='tEEVO',startDelay=600,tokenAddress=null,openPaid=false,tokenRecipients=[],usdcGoldCost=0n,log=()=>{}}){
+  const provider=deployer.provider,{chainId}=await provider.getNetwork();
+  if(chainId===1n)throw Error('MAINNET_REFUSED');
+  if(!ethers.isAddress(signerAddress))throw Error('SIGNER_ADDRESS_INVALID');
+@@ -33,7 +37,17 @@ export async function deployRehearsal({deployer,signerAddress,revealSigner,snaps
+  if(tokenRecipients.some(a=>!ethers.isAddress(a))||(tokenRecipients.length&&tokenAddress))throw Error('TOKEN_RECIPIENTS_INVALID');
+  const tree=snapshotTree(snapshotWallets),owner=await deployer.getAddress(),steps=[];
+  const record=async(name,tx)=>{const rc=await tx.wait();steps.push({name,hash:tx.hash,gasUsed:rc.gasUsed.toString()});log(name,tx.hash);return rc;};
+- async function deploy(key,args,name){const c=await new ethers.ContractFactory(artifacts[key].abi,artifacts[key].bytecode,deployer).deploy(...args);await record(name,c.deploymentTransaction());return c;}
++ // 2026-10-29: a load-balanced public RPC can answer the next estimateGas from a node that has not seen the contract
++ // just mined (the Genesis constructor then reverted TOKEN_IDENTITY_REQUIRED on a fresh TestUSD): wait until the code is
++ // readable several times in a row before the next step.
++ async function codeVisible(address){
++  for(let i=0,seen=0;i<90;i++){
++   if((await provider.getCode(address))!=='0x'){if(++seen>=3)return;}else seen=0;
++   await new Promise(r=>setTimeout(r,2000));
++  }
++  throw Error('CODE_NOT_VISIBLE '+address);
++ }
++ async function deploy(key,args,name){const c=await new ethers.ContractFactory(artifacts[key].abi,artifacts[key].bytecode,deployer).deploy(...args);await record(name,c.deploymentTransaction());await codeVisible(await c.getAddress());return c;}
+  const token=tokenAddress??await (await deploy(TEST_USD,[owner],'deploy TestUSD')).getAddress();
+  const genesisArgs=[owner,token,signerAddress,ethers.getAddress(recipient),paidCost,goldCost,symbol];
+  const genesis=await deploy(GENESIS,genesisArgs,'deploy EmberEvoGenesis');
+@@ -48,16 +62,30 @@ export async function deployRehearsal({deployer,signerAddress,revealSigner,snaps
+  await record('setMintPaused(false)',await genesis.setMintPaused(false));
+  // Paid rehearsal: open the route at the deploy-time (test) price, and hand test tUSD to the test wallets.
+  if(openPaid)await record('approvePaidPrice',await genesis.approvePaidPrice());
++ // Submission9 rehearsal: a 6-decimal TestUSDC added at its own GOLD price (mainnet: USDC at 1,600), usable two days later.
++ let usdc=null;
++ if(usdcGoldCost>0n){
++  if(tokenAddress)throw Error('USDC_REHEARSAL_NEEDS_TEST_USD');
++  usdc=await (await deploy(TEST_USDC,[owner],'deploy TestUSDC')).getAddress();
++  await record('addPaymentToken(tUSDC)',await genesis.addPaymentToken(usdc,usdcGoldCost));
++ }
+  if(tokenRecipients.length){const t=new ethers.Contract(token,artifacts[TEST_USD].abi,deployer);
+-  for(const to of tokenRecipients)await record('tUSD 1,000 -> '+to,await t.transfer(to,1_000n*10n**18n));}
++  for(const to of tokenRecipients)await record('tUSD 1,000 -> '+to,await t.transfer(to,1_000n*10n**18n));
++  if(usdc){const u=new ethers.Contract(usdc,artifacts[TEST_USDC].abi,deployer);
++   for(const to of tokenRecipients)await record('tUSDC 1,000 -> '+to,await u.transfer(to,1_000n*10n**6n));}}
+  const contract=await genesis.getAddress();
+  const codeHash=ethers.keccak256(await provider.getCode(contract));
+- return {chainId:Number(chainId),owner,contract,token,tokenIsTestUSD:!tokenAddress,recipient:ethers.getAddress(recipient),signer:signerAddress,snapshotRoot:tree.root,eligible:tree.count,
++ // Every payment token as the contract stores it (paymentTokens(token): low 128 bits amount, bits 128-215 GOLD price,
++ // bits 216-255 usableAt): the GOLD book registry is built from these read-backs, never from the inputs above.
++ const readToken=async t=>{const p=await genesis.paymentTokens(t);return {token:ethers.getAddress(t),amount:(p&LOW128).toString(),goldCost:((p>>128n)&((1n<<88n)-1n)).toString(),usableAt:Number(p>>216n)};};
++ const paymentTokens=[await readToken(token),...(usdc?[await readToken(usdc)]:[])];
++ return {chainId:Number(chainId),owner,contract,token,tokenIsTestUSD:!tokenAddress,usdc,paymentTokens,tokenRecipients,domainVersion:(await genesis.eip712Domain())[2],recipient:ethers.getAddress(recipient),signer:signerAddress,snapshotRoot:tree.root,eligible:tree.count,
+   freeStartAt,startBlock:Number(await genesis.startBlock()),pendingURI,metadataBase,revealCommit,paidCost:paidCost.toString(),goldCost:goldCost.toString(),symbol,
+   paidRoute:openPaid?'open (approvePaidPrice called; test price)':'closed (approvePaidPrice not called)',codeHash,steps,
+   // for Etherscan "Verify & Publish" (Solidity standard JSON input = contract/artifacts/standard-input.private.json)
+   etherscan:{contractName:GENESIS,compiler:'v0.8.38+commit.1835d247',constructorArgsHex:genesis.interface.encodeDeploy(genesisArgs).slice(2),
+-   tokenConstructorArgsHex:tokenAddress?null:ethers.AbiCoder.defaultAbiCoder().encode(['address'],[owner]).slice(2)},
++   tokenConstructorArgsHex:tokenAddress?null:ethers.AbiCoder.defaultAbiCoder().encode(['address'],[owner]).slice(2),
++   usdcConstructorArgsHex:usdc?ethers.AbiCoder.defaultAbiCoder().encode(['address'],[owner]).slice(2):null},
+   totalGas:steps.reduce((a,s)=>a+BigInt(s.gasUsed),0n).toString()};
+ }
+ 
+@@ -70,8 +98,18 @@ export function followUp(d){
+   // contract's EIP-712 version, stored with every hold. addedTokenGoldCosts (owner 2026-10-29): the GOLD price of each
+   // token added with addPaymentToken(token, goldCost); empty at deployment. Add the entry only after the added tokens are
+   // on chain, with their prices read back from paymentTokens(token) (a price not listed refuses that token's orders).
+-  goldBookRegistry:{id:'sepolia-'+d.contract.slice(2,10).toLowerCase(),environment:'sepolia',chainId:d.chainId,contract:d.contract.toLowerCase(),codeHash:d.codeHash,
+-   deployBlock:String(d.startBlock),embeoCost:d.paidCost,goldCost:d.goldCost,addedTokenGoldCosts:[],signer:d.signer,domainVersion:'7',recipient:d.recipient.toLowerCase()}};
++  // 2026-10-29 (World 7d09bda): every token with its GOLD price and the exact amount mintPaid charges (World audit
++  // 93dae57f finding 1), all from the paymentTokens(token) read-backs in d.paymentTokens.
++  goldBookRegistry:goldBookEntry(d)};
++}
++/** The World 7d09bda registry entry (server/genesis-gold.ts GenesisDeployment) from a deploy record's read-backs. */
++export function goldBookEntry(d){
++ const [base,...added]=d.paymentTokens;
++ if(!base||base.token.toLowerCase()!==d.token.toLowerCase())throw Error('PAYMENT_TOKENS_READBACK_MISSING');
++ return {id:'sepolia-r9-'+d.contract.slice(2,10).toLowerCase(),environment:'sepolia',chainId:d.chainId,contract:d.contract.toLowerCase(),codeHash:d.codeHash,
++  deployBlock:String(d.startBlock),embeoCost:d.paidCost,paymentToken:base.token.toLowerCase(),goldCost:base.goldCost,paymentAmount:base.amount,
++  addedTokens:added.map(t=>({token:t.token.toLowerCase(),goldCost:t.goldCost,amount:t.amount})),signer:d.signer.toLowerCase(),
++  domainVersion:d.domainVersion,recipient:d.recipient.toLowerCase()};
+ }
+ 
+ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+@@ -82,7 +120,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+   deployer=await provider.getSigner(0);close=()=>rpc.disconnect();
+   args={signerAddress:testAuthority(1).address,revealSigner:testAuthority(1),snapshotWallets:[await (await provider.getSigner(1)).getAddress(),await (await provider.getSigner(2)).getAddress()],
+    pendingURI:'ipfs://REHEARSAL/pending.json',metadataBase:'ipfs://REHEARSAL/looks/',revealCommit:revealChain(ethers.keccak256(ethers.toUtf8Bytes('ember-evo-genesis DRY RUN reveal chain'))).anchor,
+-   recipient:testAuthority(4).address,paidCost:20n*10n**18n,goldCost:1200n,openPaid:true,tokenRecipients:[await (await provider.getSigner(2)).getAddress()]};
++   recipient:testAuthority(4).address,paidCost:20n*10n**18n,goldCost:1200n,openPaid:true,tokenRecipients:[await (await provider.getSigner(2)).getAddress()],usdcGoldCost:1600n};
+  }else{
+   const need=k=>{const v=process.env[k];if(!v)throw Error('missing env '+k);return v;};
+   const provider=new ethers.JsonRpcProvider(need('RPC_URL'));
+@@ -91,12 +129,13 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+   args={signerAddress:need('SIGNER_ADDRESS'),revealSigner:new ethers.Wallet(readFileSync(need('SIGNER_KEY_FILE'),'utf8').trim()),snapshotWallets:JSON.parse(readFileSync(need('SNAPSHOT_FILE'),'utf8')),pendingURI:need('PENDING_URI'),
+    metadataBase:need('METADATA_BASE'),revealCommit:need('REVEAL_COMMIT'),recipient:need('PAYMENT_RECIPIENT'),paidCost:BigInt(process.env.PAID_COST??'20')*10n**18n,goldCost:BigInt(process.env.GOLD_COST??'1200'),
+    symbol:process.env.SYMBOL??'tEEVO',tokenAddress:process.env.PAYMENT_TOKEN||null,startDelay:Number(process.env.START_DELAY_SECONDS??600),
+-   openPaid:process.env.OPEN_PAID==='1',tokenRecipients:(process.env.TOKEN_RECIPIENTS??'').split(',').map(s=>s.trim()).filter(Boolean)};
++   openPaid:process.env.OPEN_PAID==='1',tokenRecipients:(process.env.TOKEN_RECIPIENTS??'').split(',').map(s=>s.trim()).filter(Boolean),
++   usdcGoldCost:BigInt(process.env.USDC_GOLD_COST??'1600')};
+  }
+  try{
+   const d=await deployRehearsal({deployer,...args,log:(n,h)=>console.log('  ',n,h)});
+   const file=fileURLToPath(new URL(`../deployments/${dry?'dryrun-':''}${d.chainId}-${Date.now()}.json`,import.meta.url));
+   mkdirSync(resolve(file,'..'),{recursive:true});writeFileSync(file,JSON.stringify({...d,followUp:followUp(d)},null,1));
+-  console.log(JSON.stringify({contract:d.contract,token:d.token,eligible:d.eligible,totalGas:d.totalGas,file},null,1));
++  console.log(JSON.stringify({contract:d.contract,token:d.token,usdc:d.usdc,paymentTokens:d.paymentTokens,eligible:d.eligible,totalGas:d.totalGas,file},null,1));
+  }finally{close();}
+ }
+
+--- Submission9/tools/verify-etherscan.mjs
++++ Submission10/tools/verify-etherscan.mjs
+@@ -10,6 +10,7 @@ if(!file)throw Error('usage: verify-etherscan.mjs <deployment record json> [--dr
+ const d=JSON.parse(readFileSync(resolve(file),'utf8'));
+ const input=readFileSync(new URL('../artifacts/standard-input.private.json',import.meta.url),'utf8');
+ const API='https://api.etherscan.io/v2/api?chainid='+d.chainId;
++const EXPLORER=(d.chainId===1?'https://etherscan.io':'https://sepolia.etherscan.io')+'/address/';
+ const fields={module:'contract',action:'verifysourcecode',contractaddress:d.contract,sourceCode:input,codeformat:'solidity-standard-json-input',
+  contractname:d.etherscan.contractName,compilerversion:d.etherscan.compiler,constructorArguements:d.etherscan.constructorArgsHex,licenseType:'3'};   // 3 = MIT
+ console.log(JSON.stringify({chainId:d.chainId,contract:d.contract,contractname:fields.contractname,compiler:fields.compilerversion,
+@@ -19,7 +20,7 @@ const key=String(process.env.ETHERSCAN_API_KEY??'').trim();
+ if(!/^[A-Za-z0-9]{20,64}$/.test(key))throw Error('ETHERSCAN_API_KEY missing or malformed');
+ const post=await (await fetch(API,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({...fields,apikey:key})})).json();
+ if(post.status!=='1'){
+- if(/already verified/i.test(String(post.result))){console.log('Already verified: https://sepolia.etherscan.io/address/'+d.contract+'#code');process.exit(0);}
++ if(/already verified/i.test(String(post.result))){console.log('Already verified: '+EXPLORER+d.contract+'#code');process.exit(0);}
+  throw Error('Etherscan refused: '+String(post.result).slice(0,300));
+ }
+ console.log('Submitted, waiting for Etherscan (guid '+post.result+') …');
+@@ -28,7 +29,7 @@ for(let i=0;i<30;i++){
+  const s=await (await fetch(API+'&'+new URLSearchParams({module:'contract',action:'checkverifystatus',guid:post.result,apikey:key}))).json();
+  const msg=String(s.result);
+  if(/pending/i.test(msg))continue;
+- if(s.status==='1'||/pass|already verified/i.test(msg)){console.log('Verified: https://sepolia.etherscan.io/address/'+d.contract+'#code');process.exit(0);}
++ if(s.status==='1'||/pass|already verified/i.test(msg)){console.log('Verified: '+EXPLORER+d.contract+'#code');process.exit(0);}
+  throw Error('Verification failed: '+msg.slice(0,300));
+ }
+-throw Error('Still pending after 150 s; check https://sepolia.etherscan.io/address/'+d.contract+'#code later');
++throw Error('Still pending after 150 s; check '+EXPLORER+d.contract+'#code later');

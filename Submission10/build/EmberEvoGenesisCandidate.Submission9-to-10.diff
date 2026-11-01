@@ -1,0 +1,13 @@
+--- Submission9/contracts/EmberEvoGenesisCandidate.sol
++++ Submission10/contracts/EmberEvoGenesisCandidate.sol
+@@ -233,8 +233,8 @@ contract EmberEvoGenesisCandidate is ERC721, IERC4906, Ownable2Step, EIP712 {
+     constructor(address owner_, address token_, address signer_, address recipient_, uint256 cost_, uint256 goldCost_, string memory symbol_)
+         ERC721("Ember Evo Genesis", symbol_) Ownable(owner_) EIP712("EmberEvoGenesisCandidate", "7")
+     {
+-        // Rehearsal guard: remove only after the final review signs off a mainnet deployment.
+-        require(block.chainid != 1, "MAINNET_NOT_REVIEWED");
++        // The rehearsal guard require(block.chainid != 1) was removed for the mainnet deployment (owner 2026-11-01;
++        // Swarm audit d1c83d3d closed the review of Submission 9, the code is otherwise unchanged).
+         require(token_.code.length != 0 && IERC20Metadata(token_).decimals() == 18, "TOKEN_IDENTITY_REQUIRED");
+         require(signer_ != address(0) && signer_ != address(this), "INVALID_ROLE");
+         // the token contract itself, or this one, could never pass the payments on
