@@ -1,0 +1,1209 @@
+--- Submission10/tests/contract/deploy-mainnet.test.mjs
++++ Submission11/tests/contract/deploy-mainnet.test.mjs
+@@ -1,16 +1,20 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import {readFileSync} from 'node:fs';
++import {fileURLToPath} from 'node:url';
+ import {ethers,createTestProvider,testAuthority} from '../tools/runtime.mjs';
+ import {GENESIS,SEPOLIA} from '../tools/deploy-testnet.mjs';
+ const FIXTURE_18='contracts/test/Fixtures.sol:FixtureToken',FIXTURE_DEC='contracts/test/Fixtures.sol:DecimalsToken';
+-import {deployMainnet,mainnetGoldBookEntry,MAINNET} from '../tools/deploy-mainnet.mjs';
+-import {acceptBatch,openBatch} from '../tools/safe-batch.mjs';
+-import {FreeApprovalSigner} from '../../signer/free-approval.mjs';
++import {deployMainnet,mainnetGoldBookEntry,MAINNET,verifyBuild,runtimeMatches,validateUris,localBuild,mainnetProvider,runGuard,gasToFund} from '../tools/deploy-mainnet.mjs';
++import {acceptBatch,openBatch,calldataOf,batchChecksum,unix,chainState,checkAccept,checkOpen,checkRecord,checkWorkerList,checkPendingServed,checkSampleServed,contractWallets} from '../tools/safe-batch.mjs';
++import {redact,failureSummary} from '../tools/tool-errors.mjs';
++import {FreeApprovalSigner,snapshotTree} from '../../signer/free-approval.mjs';
++import {PaidApprovalSigner} from '../../signer/paid-approval.mjs';
+ import {revealChain,readyReveals} from '../../signer/reveal-chain.mjs';
+ 
+ const artifacts=JSON.parse(readFileSync(new URL('../artifacts/test-artifacts.private.json',import.meta.url),'utf8'));
+ const look={body:'standard',hat:null,top:'TOP_TEE.ss_crew',vest:null,outer:null,bottom:'BOTTOM_TROUSER.straight_full',shoes:null,eyewear:null,neck:null,belt:null,strap:null};
++const FAST={pollMs:1,visibleTries:40,stepTimeoutMs:5};
+ async function chain(id){const rpc=await createTestProvider(id),provider=new ethers.BrowserProvider(rpc,undefined,{cacheTimeout:-1});return {rpc,provider};}
+ const now=async p=>(await p.getBlock('latest')).timestamp;
+ // Stand-ins on the simulated chain (the Sepolia test tokens refuse chainId 1): local fixtures with 18 decimals for imdUSD
+@@ -20,7 +24,7 @@ export async function standIns(deployer){
+  return {...MAINNET,imdUSD:await dep(FIXTURE_18),usdc:await dep(FIXTURE_DEC,6),safe:testAuthority(4).address};
+ }
+ // The Safe's transactions from a Transaction Builder file, sent by the stand-in Safe account.
+-async function execute(provider,file,safe){for(const t of file.transactions)await (await safe.sendTransaction({to:t.to,data:t.data,value:0n})).wait();}
++async function execute(provider,file,safe){for(const t of file.transactions)await (await safe.sendTransaction({to:t.to,data:calldataOf(t),value:0n})).wait();}
+ 
+ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts ownership, then the Safe sets the free list and opens',async()=>{
+  const {rpc,provider}=await chain(1);try{
+@@ -28,8 +32,9 @@ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts owne
+   const cfg=await standIns(deployer),rc=revealChain(ethers.keccak256(ethers.toUtf8Bytes('mainnet deploy test reveal chain')),64);
+   // the signer key must not be the deployer's (separate secrets)
+   await assert.rejects(deployMainnet({deployer,revealSigner:deployer,revealCommit:rc.anchor,cfg}),/SIGNER_IS_DEPLOYER/);
+-  const d=await deployMainnet({deployer,revealSigner:key,revealCommit:rc.anchor,cfg});
++  const d=await deployMainnet({deployer,revealSigner:key,revealCommit:rc.anchor,cfg,timing:FAST});
+   assert.deepEqual(d.readBackMismatch,[]);
++  assert.equal(d.revealURIsLocked,false);assert.ok(d.reviewedBuild.immutableRuns>0);assert.equal(d.deployBlock,d.startBlock);
+   assert.equal(d.chainId,1);assert.equal(d.owner,await deployer.getAddress());assert.equal(d.pendingOwner,cfg.safe);assert.equal(d.recipient,cfg.safe);
+   assert.equal(d.symbol,'EGEN');assert.equal(d.metadataBase,'https://genesis.imdember.com/meta/');assert.equal(d.mintPaused,true);
+   assert.equal(d.paymentTokens[0].amount,'20000000000000000000');assert.equal(d.paymentTokens[0].goldCost,'1200');
+@@ -41,6 +46,7 @@ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts owne
+   const g=new ethers.Contract(d.contract,artifacts[GENESIS].abi,provider);
+   // nobody can open before the Safe sets the free list; the deployer can still act as owner until the Safe accepts
+   await assert.rejects(g.connect(deployer).setMintPaused.staticCall(false),/OPEN_NOT_READY/);
++  assert.equal(await g.revealURIsLocked(),false);
+   const safe=new ethers.Wallet(testAuthority(4).privateKey,provider);
+   await execute(provider,acceptBatch(d),safe);
+   assert.equal(await g.owner(),cfg.safe);assert.equal(await g.pendingOwner(),ethers.ZeroAddress);
+@@ -50,10 +56,15 @@ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts owne
+   assert.throws(()=>openBatch(d,wallets,t-60,t+3600,t),/at least 6 hours/);
+   assert.throws(()=>openBatch(d,wallets,t+60,t+7*3600,t),/in the past/);
+   const o=openBatch(d,wallets,t-60,t+7*3600,t);
+-  assert.equal(o.tree.count,2);assert.equal(o.file.transactions.length,2);assert.equal(o.file.chainId,'1');assert.equal(o.file.meta.createdFromSafeAddress,cfg.safe);
++  assert.equal(o.tree.count,2);assert.equal(o.file.transactions.length,3);assert.equal(o.file.transactions[0].contractMethod.name,'setRevealURIs');assert.equal(o.file.transactions[0].contractInputsValues.lock,'true');assert.equal(o.file.chainId,'1');assert.equal(o.file.meta.createdFromSafeAddress,cfg.safe);
+   await execute(provider,o.file,safe);
+-  assert.equal(await g.snapshotConfigured(),true);assert.equal(await g.mintPaused(),false);assert.equal(await g.eligibleWalletCount(),2n);
++  assert.equal(await g.snapshotConfigured(),true);assert.equal(await g.mintPaused(),false);assert.equal(await g.revealURIsLocked(),true);assert.equal(await g.eligibleWalletCount(),2n);
+   const signer=new FreeApprovalSigner({provider,contractAddress:d.contract,chainId:1,signer:key,metadataBase:d.metadataBase,snapshotWallets:wallets});
++  // a Worker bundling another free list stops selling paid mints too (audit 90ae2f92 finding 7)
++  const paid=root=>new PaidApprovalSigner({provider,contractAddress:d.contract,chainId:1,signer:key,metadataBase:d.metadataBase,gold:{reserve(){}},deploymentId:'test',ticketSecret:'s'.repeat(32),snapshotRoot:root});
++  const order={wallet:await alice.getAddress(),look,choice:1,token:cfg.imdUSD};
++  await assert.rejects(paid('0x'+'1'.repeat(64)).prepare(order),{code:'SNAPSHOT_MISMATCH'});
++  await assert.rejects(paid(o.tree.root).prepare(order),{code:'PAID_NOT_AVAILABLE'});   // past the check: not open yet
+   await assert.rejects(signer.approve({wallet:await alice.getAddress(),look,choice:0}),{code:'SALE_NOT_STARTED'});
+   await rpc.request({method:'evm_increaseTime',params:[7*3600+1]});await rpc.request({method:'evm_mine',params:[]});
+   const m=(await signer.approve({wallet:await alice.getAddress(),look,choice:1})).mintFree;
+@@ -72,3 +83,322 @@ test('the mainnet tool refuses another chain',async()=>{
+   await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:'0x'+'1'.repeat(64)}),/WRONG_CHAIN/);
+  }finally{await rpc.disconnect();}
+ });
++
++// Swarm audit 90ae2f92: what the mainnet tools do when the local build, the RPC, a step or the owner's input goes wrong.
++const COMMIT=()=>revealChain(ethers.keccak256(ethers.toUtf8Bytes('mainnet tool failure tests')),64).anchor;
++// The same deployer behind an RPC that lags: every read below can answer as a node a block or more behind would.
++function laggingDeployer(deployer,share=0.3){
++ let seed=7;const lag=()=>{seed=(seed*1103515245+12345)&0x7fffffff;return seed/0x7fffffff<share;};
++ const provider=new Proxy(deployer.provider,{get(t,k){
++  const v=t[k];
++  if(k==='getBlockNumber')return async()=>{const b=await t.getBlockNumber();return lag()?b-1:b;};
++  if(k==='getBlock')return async b=>lag()?null:t.getBlock(b);
++  if(k==='getCode')return async a=>lag()?'0x':t.getCode(a);
++  if(k==='getTransactionReceipt')return async h=>lag()?null:t.getTransactionReceipt(h);
++  return typeof v==='function'?v.bind(t):v;}});
++ const sent=[];
++ return {sent,signer:new Proxy(deployer,{get(t,k){
++  if(k==='provider')return provider;
++  if(k==='sendTransaction')return async tx=>{sent.push(tx);return t.sendTransaction(tx);};
++  const v=t[k];return typeof v==='function'?v.bind(t):v;}})};
++}
++
++test('the local build must be the reviewed one: refused before anything is sent',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),build=localBuild();
++  assert.doesNotThrow(()=>verifyBuild(build));
++  const receipt=JSON.parse(readFileSync(new URL('../artifacts/build-receipt.private.json',import.meta.url),'utf8')).artifacts[GENESIS];
++  assert.equal(MAINNET.reviewed.initcodeSha256,receipt.creationBytecodeSha256);assert.equal(MAINNET.reviewed.runtimeSha256,receipt.runtimeTemplateSha256);assert.equal(MAINNET.reviewed.abiSha256,receipt.abiSha256);
++  const flip=h=>h.slice(0,-1)+(h.endsWith('0')?'1':'0');
++  const before=await provider.getTransactionCount(await deployer.getAddress());
++  for(const bad of [{...build,bytecode:flip(build.bytecode)},{...build,runtimeBytecode:flip(build.runtimeBytecode)},{...build,abi:build.abi.slice(1)},artifacts['contracts/test/Fixtures.sol:SupplyBoundaryHarness']])
++   await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,build:bad,timing:FAST}),/BUILD_NOT_REVIEWED/);
++  assert.equal(await provider.getTransactionCount(await deployer.getAddress()),before);
++ }finally{await rpc.disconnect();}
++});
++
++test('deployed code: only immutable slots may differ from the reviewed runtime',()=>{
++ const zero='00'.repeat(32),t='0x6001'+zero+'6002',filled='0x6001'+'00'.repeat(12)+'ab'.repeat(20)+'6002';
++ assert.deepEqual(runtimeMatches(t,filled),{ok:true,immutableRuns:1});
++ assert.equal(runtimeMatches(t,'0x6009'+zero+'6002').ok,false);          // code outside a slot changed
++ assert.equal(runtimeMatches('0x6001'+'00'.repeat(5)+'6002','0x6001'+'ab'.repeat(5)+'6002').ok,false);   // zeros too short to be a slot
++ assert.equal(runtimeMatches(t,t+'00').ok,false);                        // another length
++});
++
++test('metadata strings are checked before they are stored',()=>{
++ assert.doesNotThrow(()=>validateUris(MAINNET));
++ assert.throws(()=>validateUris({...MAINNET,metadataBase:'https://genesis.imdember.com/meta'}),/METADATA_BASE_INVALID/);
++ assert.throws(()=>validateUris({...MAINNET,metadataBase:'http://genesis.imdember.com/meta/'}),/METADATA_BASE_INVALID/);
++ assert.throws(()=>validateUris({...MAINNET,pendingURI:'https://other.example/pending.json'}),/PENDING_URI_INVALID/);
++});
++
++test('a lagging RPC: fixed consecutive nonces, the run completes and reads back clean',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),{signer,sent}=laggingDeployer(deployer);
++  const start=await provider.getTransactionCount(await deployer.getAddress());
++  const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:{pollMs:1,visibleTries:200,visibleReads:2,stepTimeoutMs:2000}});
++  assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
++  assert.deepEqual(sent.map(t=>t.nonce),[0,1,2,3,4,5].map(i=>start+i));
++ }finally{await rpc.disconnect();}
++});
++
++test('a transaction that never lands is resent at the same nonce with a higher fee and a fresh acceptance',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),calls=[];let dropped=false;
++  const signer=new Proxy(deployer,{get(t,k){
++   if(k==='sendTransaction')return async tx=>{calls.push(tx);
++    if(!dropped&&calls.length===3){dropped=true;return {hash:'0x'+'ab'.repeat(32)};}   // the third step: accepted by one node, then lost
++    return t.sendTransaction(tx);};
++   const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:{pollMs:1,stepTimeoutMs:5,visibleTries:40}});
++  assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
++  assert.equal(calls[2].nonce,calls[3].nonce);assert.ok(calls[3].maxFeePerGas>=calls[2].maxFeePerGas*125n/100n);
++ }finally{await rpc.disconnect();}
++});
++
++test('a run that stops halfway resumes from the chain: same contract, nothing sent twice, other keys refused',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  let saved=null,count=0;
++  const failing=new Proxy(deployer,{get(t,k){
++   if(k==='sendTransaction')return async tx=>{if(++count>=4)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.sendTransaction(tx);};
++   const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  await assert.rejects(deployMainnet({deployer:failing,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:2,stepTimeoutMs:5,visibleTries:40}}),/rpc down/);
++  assert.equal(saved.steps.length,3);assert.ok(await provider.getCode(saved.contract)!=='0x');
++  const g=new ethers.Contract(saved.contract,artifacts[GENESIS].abi,provider);
++  assert.equal(await g.paidPriceApproved(),false);
++  await assert.rejects(deployMainnet({deployer,revealSigner:key,revealCommit:'0x'+'1'.repeat(64),cfg,resume:saved,timing:FAST}),/RESUME_OTHER_REVEAL_COMMIT/);
++  await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(2),revealCommit:commit,cfg,resume:saved,timing:FAST}),/RESUME_OTHER_SIGNER/);
++  await assert.rejects(deployMainnet({deployer:await provider.getSigner(3),revealSigner:key,revealCommit:commit,cfg,resume:saved,timing:FAST}),/RESUME_OTHER_DEPLOYER/);
++  const before=await provider.getTransactionCount(await deployer.getAddress());
++  const d=await deployMainnet({deployer,revealSigner:key,revealCommit:commit,cfg,resume:saved,timing:FAST});
++  assert.equal(d.contract,saved.contract);assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
++  assert.equal(await provider.getTransactionCount(await deployer.getAddress()),before+3);
++  // once finished a second resume sends nothing
++  const again=await deployMainnet({deployer,revealSigner:key,revealCommit:commit,cfg,resume:{...saved,steps:d.steps},timing:FAST});
++  assert.deepEqual(again.readBackMismatch,[]);assert.equal(await provider.getTransactionCount(await deployer.getAddress()),before+3);
++ }finally{await rpc.disconnect();}
++});
++
++test('a run stopped before the deploy landed resumes at the planned address; a used nonce stops it',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT(),owner=await deployer.getAddress();
++  const nonce=await provider.getTransactionCount(owner),plan={deployer:owner,signer:key.address,revealCommit:commit,contract:ethers.getCreateAddress({from:owner,nonce}),planNonce:nonce,steps:[]};
++  const d=await deployMainnet({deployer,revealSigner:key,revealCommit:commit,cfg,resume:plan,timing:FAST});
++  assert.equal(d.contract,plan.contract);assert.deepEqual(d.readBackMismatch,[]);
++  const n2=await provider.getTransactionCount(owner),lost={...plan,contract:ethers.getCreateAddress({from:owner,nonce:n2}),planNonce:n2};
++  await (await deployer.sendTransaction({to:owner,value:0n,nonce:n2})).wait();
++  await assert.rejects(deployMainnet({deployer,revealSigner:key,revealCommit:commit,cfg,resume:lost,timing:FAST}),/PLANNED_NONCE_USED/);
++ }finally{await rpc.disconnect();}
++});
++
++// A step whose gas is cut runs out and is mined with status 0: what a reverted transaction really looks like.
++const cutGas=(deployer,fn,times=Infinity)=>{const sel=ethers.id(fn).slice(0,10);let left=times;return new Proxy(deployer,{get(t,k){
++ if(k==='sendTransaction')return tx=>t.sendTransaction(tx.data?.startsWith(sel)&&left-->0?{...tx,gasLimit:BigInt(ethers.getBytes(tx.data).length*16+21100)}:tx);
++ const v=t[k];return typeof v==='function'?v.bind(t):v;}});};
++test('a reverted step is never recorded as done, and the reveal commitment gets a fresh try',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer);let last;
++  await assert.rejects(deployMainnet({deployer:cutGas(deployer,'approvePaidPrice()'),revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST,checkpoint:s=>{last=s;}}),/TX_FAILED approvePaidPrice/);
++  assert.deepEqual(last.steps.map(x=>x.name),['deploy EmberEvoGenesis','setRevealURIs (not locked)','setRevealCommit','addPaymentToken(USDC, 1600 GOLD)']);
++  const again=await deployMainnet({deployer:cutGas(deployer,'setRevealCommit(bytes32,uint256,bytes)',1),revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
++  assert.deepEqual(again.readBackMismatch,[]);assert.equal(again.steps.length,6);
++ }finally{await rpc.disconnect();}
++});
++test('read-backs the next steps depend on are compared: a wrong answer from the chain shows up',async()=>{
++ const abi=new ethers.Interface(artifacts[GENESIS].abi);
++ const cases=[['signerEpoch',()=>abi.encodeFunctionResult('signerEpoch',[2n]),'signerEpoch'],['startBlock',()=>abi.encodeFunctionResult('startBlock',[1n]),'startBlock'],
++  ['eip712Domain',r=>{const v=[...abi.decodeFunctionResult('eip712Domain',r)];v[3]=5n;return abi.encodeFunctionResult('eip712Domain',v);},'domainChainId'],
++  ['eip712Domain',r=>{const v=[...abi.decodeFunctionResult('eip712Domain',r)];v[4]=testAuthority(2).address;return abi.encodeFunctionResult('eip712Domain',v);},'domainContract'],
++  ['paymentTokens',(r,tx,cfg)=>tx.data.toLowerCase().includes(cfg.usdc.slice(2).toLowerCase())?abi.encodeFunctionResult('paymentTokens',[abi.decodeFunctionResult('paymentTokens',r)[0]^(1n<<216n)]):r,'paymentTokens(USDC).usableAt']];
++ for(const [fn,tamper,field] of cases){
++  const {rpc,provider}=await chain(1);try{
++   const deployer=await provider.getSigner(0),cfg=await standIns(deployer),sel=abi.getFunction(fn).selector;let done=false;
++   const signer=new Proxy(deployer,{get(t,k){if(k==='call')return async tx=>{const r=await t.call(tx);return done&&tx.data.startsWith(sel)?tamper(r,tx,cfg):r;};const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++   const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST,checkpoint:s=>{if(s.steps.length===6)done=true;}});
++   assert.ok(d.readBackMismatch.includes(field),field+': '+d.readBackMismatch);
++  }finally{await rpc.disconnect();}
++ }
++});
++test('the Worker gives the paid signer the bundled list root',()=>{
++ assert.match(readFileSync(new URL('../../signer/worker-entry.mjs',import.meta.url),'utf8'),/new PaidApprovalSigner\(\{[^}]*snapshotRoot:tree\.root/);
++});
++
++test('a real read-back mismatch is reported',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg={...await standIns(deployer),name:'Another Name'};
++  const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
++  assert.deepEqual(d.readBackMismatch,['name']);
++ }finally{await rpc.disconnect();}
++});
++
++test('errors never carry the RPC URL: mainnet entry point against an RPC answering 401',async()=>{
++ const {createServer}=await import('node:http'),{spawn}=await import('node:child_process'),{mkdtempSync,writeFileSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
++ const server=createServer((q,r)=>{r.writeHead(401,{'content-type':'application/json'});r.end('{"error":"Must be authenticated!"}');});
++ await new Promise(r=>server.listen(0,'127.0.0.1',r));
++ const url=`http://127.0.0.1:${server.address().port}/v2/SECRETKEY123`,dir=mkdtempSync(join(tmpdir(),'deploy-mainnet-test-'));
++ try{
++  const keyFile=join(dir,'signer.key');writeFileSync(keyFile,testAuthority(1).privateKey);
++  const out=await new Promise((done,fail)=>{
++   const p=spawn(process.execPath,[...process.execArgv.filter(a=>!a.startsWith('--test')),fileURLToPath(new URL('../tools/deploy-mainnet.mjs',import.meta.url))],
++    {env:{...process.env,RPC_URL:url,DEPLOYER_PRIVATE_KEY:testAuthority(2).privateKey,SIGNER_KEY_FILE:keyFile,REVEAL_COMMIT:'0x'+'1'.repeat(64),PREFLIGHT_ONLY:'1',DEPLOYMENTS_DIR:dir}});
++   let text='';p.stdout.on('data',b=>text+=b);p.stderr.on('data',b=>text+=b);
++   const timer=setTimeout(()=>{p.kill();fail(Error('tool did not stop: '+text.slice(0,300)));},30000);
++   p.on('close',code=>{clearTimeout(timer);done({code,text});});
++  });
++  assert.equal(out.code,1);assert.ok(!out.text.includes('SECRETKEY123'),out.text);assert.ok(!out.text.includes(url),out.text);assert.match(out.text,/SERVER_ERROR|401/);
++ }finally{server.close();rmSync(dir,{recursive:true,force:true});}
++ assert.equal(redact('see https://eth-mainnet.g.alchemy.com/v2/abc?x=1 now'),'see <URL> now');
++ const s=failureSummary(Object.assign(Error('server response 401 (info={ "requestUrl": "https://x.example/v2/KEY" })'),{code:'SERVER_ERROR',info:{requestUrl:'https://x.example/v2/KEY',responseStatus:'401 Unauthorized'}}));
++ assert.ok(!JSON.stringify(s).includes('KEY'));assert.equal(s.status,'401 Unauthorized');
++});
++
++test('opening time: unix typos and far dates are refused; the once-only batch names its date',()=>{
++ const d={chainId:1,contract:testAuthority(5).address,safe:testAuthority(4).address,maxSupply:'1688',pendingURI:MAINNET.pendingURI,metadataBase:MAINNET.metadataBase};
++ const wallets=[testAuthority(6).address],t=1_790_000_000;
++ assert.throws(()=>unix('17630000000'),/unix time or an ISO date/);assert.throws(()=>unix('176300000'),/unix time or an ISO date/);assert.equal(unix('1763000000'),1763000000);
++ assert.equal(unix('2026-11-20T20:00:00+08:00'),Date.UTC(2026,10,20,12)/1000);
++ assert.throws(()=>openBatch(d,wallets,t-60,t+61*86400,t),/60 days/);
++ assert.throws(()=>openBatch(d,wallets,t-61*86400,t+7*3600,t),/60 days/);
++ assert.equal(openBatch(d,wallets,t-60,t+61*86400,t,{farOpening:true}).file.transactions.length,3);
++ assert.equal(openBatch(d,wallets,t-60,t+7*3600,t,{lockUris:false}).file.transactions.length,2);
++ assert.ok(openBatch(d,wallets,t-60,t+7*3600,t).file.meta.description.includes('Opening '+new Date((t+7*3600)*1000).toISOString()));
++ assert.throws(()=>openBatch(d,[ethers.ZeroAddress],t-60,t+7*3600,t),/WALLET_INVALID/);
++ assert.throws(()=>openBatch(d,['0x12'],t-60,t+7*3600,t),/WALLET_INVALID/);
++});
++
++test('Safe files: decoded calls, the Transaction Builder checksum, and the calldata the contract expects',()=>{
++ const d={chainId:1,contract:testAuthority(5).address,safe:testAuthority(4).address,maxSupply:'1688',pendingURI:MAINNET.pendingURI,metadataBase:MAINNET.metadataBase};
++ const t=1_790_000_000,wallets=[testAuthority(6).address],o=openBatch(d,wallets,t-60,t+7*3600,t),I=new ethers.Interface(artifacts[GENESIS].abi);
++ // apps/tx-builder/src/lib/checksum.ts, as validateChecksum runs it on the parsed file
++ const ser=j=>{if(Array.isArray(j))return `[${j.map(ser).join(',')}]`;if(typeof j==='object'&&j!==null){let a='';const k=Object.keys(j).sort();a+=`{${JSON.stringify(k)}`;for(const x of k)a+=`${ser(j[x])},`;return a+'}';}return JSON.stringify(j);};
++ const validate=file=>{const f=JSON.parse(JSON.stringify(file)),c=f.meta.checksum;delete f.meta.checksum;return ethers.keccak256(ethers.toUtf8Bytes(ser({...f,meta:{...f.meta,name:null}})))===c;};
++ for(const file of [o.file,acceptBatch(d)]){
++  assert.equal(validate(file),true);assert.match(file.meta.checksum,/^0x[0-9a-f]{64}$/);
++  for(const tx of file.transactions){assert.equal(tx.data,null);assert.equal(tx.contractMethod.payable,false);assert.ok(I.getFunction(calldataOf(tx).slice(0,10)),'selector exists in the ABI');}
++  const {checksum,...meta}=file.meta;assert.equal(batchChecksum({...file,meta}),checksum);
++ }
++ const tampered=JSON.parse(JSON.stringify(o.file));tampered.transactions[1].contractInputsValues.start='9999999999';assert.equal(validate(tampered),false);
++ const [uris,snap,open]=o.file.transactions.map(calldataOf);
++ assert.deepEqual([...I.decodeFunctionData('setRevealURIs',uris)],[MAINNET.pendingURI,MAINNET.metadataBase,true]);
++ assert.deepEqual([...I.decodeFunctionData('configureSnapshot',snap)].slice(1).map(String),['1',String(t-60),String(t+7*3600)]);
++ assert.equal(I.decodeFunctionData('setMintPaused',open)[0],false);
++});
++
++test('the Safe files are refused when the chain no longer matches the record',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),other=testAuthority(7).address;
++  const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
++  const g=new ethers.Contract(d.contract,artifacts[GENESIS].abi,deployer),safe=new ethers.Wallet(testAuthority(4).privateKey,provider),state=()=>chainState(provider,d);
++  checkAccept(await state(),d);
++  assert.throws(()=>checkOpen(await0(d),d),/NOT_OWNER/);
++  // the deployer key re-targets the hand-over: accept is refused, nobody signs a batch that would revert
++  await (await g.transferOwnership(other)).wait();
++  assert.throws(()=>checkAccept({owner:d.owner,pendingOwner:other},d),/NOT_PENDING_SAFE/);
++  await assert.rejects(async()=>checkAccept(await state(),d),/NOT_PENDING_SAFE/);
++  await (await g.transferOwnership(d.safe)).wait();
++  await (await safe.sendTransaction({to:d.contract,data:calldataOf(acceptBatch(d).transactions[0])})).wait();
++  const s=await state();assert.equal(s.owner,d.safe);assert.equal(checkOpen(s,d),true);assert.throws(()=>checkAccept(s,d),/ALREADY_ACCEPTED/);
++  assert.equal(checkOpen({...s,revealURIsLocked:true},d),false);
++  assert.throws(()=>checkOpen({...s,snapshotConfigured:true},d),/SNAPSHOT_ALREADY_SET/);
++  assert.throws(()=>checkOpen({...s,mintPaused:false},d),/ALREADY_OPEN/);
++  assert.throws(()=>checkOpen({...s,revealBaseURI:'https://x.example/'},d),/URIS_CHANGED/);
++  assert.doesNotThrow(()=>checkRecord(s,d));
++  for(const [k,v] of [['revealCommit','0x'+'2'.repeat(64)],['signer',other],['pendingSigner',other],['maxSupply','1000'],['skinCaps','1,1,1,1,1,1'],['extraTokens','2'],['paidPriceApproved',false]])
++   assert.throws(()=>checkOpen({...s,[k]:v},d),new RegExp('CHAIN_DIFFERS_FROM_RECORD '+k));
++  // a listed contract is warned about; a plain wallet and an EIP-7702 wallet are not
++  assert.deepEqual(await contractWallets(provider,[other,cfg.usdc]),[cfg.usdc]);
++  assert.deepEqual(await contractWallets({getCode:async()=>'0xef0100'+'11'.repeat(20)},[other]),[]);
++  const safeOwned={...s,owner:d.owner,pendingOwner:d.safe};
++  for(const change of [{snapshotConfigured:true},{mintPaused:false},{pendingURI:'x'},{revealBaseURI:'x'}])assert.throws(()=>checkAccept({...safeOwned,...change},d),/CHAIN_DIFFERS_FROM_RECORD/);
++  // an RPC that refuses the log range: the other checks still run, the count stays marked as unread
++  provider.getLogs=async()=>{throw Error('range refused');};
++  const unread=await state();assert.equal(unread.extraTokens,null);assert.doesNotThrow(()=>checkRecord(unread,d));
++ }finally{await rpc.disconnect();}
++});
++const await0=d=>({owner:d.owner,pendingOwner:d.safe,snapshotConfigured:false,mintPaused:true,pendingURI:d.pendingURI,revealBaseURI:d.metadataBase});
++
++test('the opening refuses a free list the Worker does not bundle, and a metadata host that does not answer',async()=>{
++ const {mkdtempSync,writeFileSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
++ const dir=mkdtempSync(join(tmpdir(),'safe-batch-test-'));try{
++  const a=testAuthority(6).address,b=testAuthority(7).address,tree=snapshotTree([a,b]),f=join(dir,'list.json');
++  writeFileSync(f,JSON.stringify([b.toLowerCase(),a.toLowerCase()]));assert.doesNotThrow(()=>checkWorkerList(tree,f));
++  writeFileSync(f,JSON.stringify([a]));assert.throws(()=>checkWorkerList(tree,f),/WORKER_LIST_DIFFERS/);
++ }finally{rmSync(dir,{recursive:true,force:true});}
++ const uri=MAINNET.pendingURI;
++ await assert.doesNotReject(checkPendingServed(uri,async()=>({ok:true,json:async()=>({name:'x'})})));
++ await assert.rejects(checkPendingServed(uri,async()=>({ok:false,status:404})),/NOT_SERVED/);
++ await assert.rejects(checkPendingServed(uri,async()=>{throw Error('down');}),/NOT_SERVED/);
++ await assert.rejects(checkPendingServed(uri,async()=>({ok:true,json:async()=>{throw Error('html');}})),/NOT_JSON/);
++ // the derived URI too: a look the host should serve, before the base locks for good
++ let asked;await assert.doesNotReject(checkSampleServed('https://h.example/meta/','0xabc/1',async u=>{asked=u;return {ok:true,json:async()=>({})};}));assert.equal(asked,'https://h.example/meta/0xabc/1');
++ for(const bad of [undefined,'','0xabc','0xabc/1?x=1','/1'])await assert.rejects(checkSampleServed('https://h.example/meta/',bad,async()=>({ok:true,json:async()=>({})})),/SAMPLE_LOOK_REQUIRED/);
++ await assert.rejects(checkSampleServed('https://h.example/meta/','0xabc/1',async()=>({ok:false,status:404})),/SAMPLE_LOOK_NOT_SERVED/);
++ await assert.rejects(checkSampleServed('https://h.example/meta/','0xabc/1',async()=>({ok:true,json:async()=>{throw Error('html');}})),/SAMPLE_LOOK_NOT_JSON/);
++});
++
++test('neither a stopped nor a finished run can deploy a second contract',async()=>{
++ const {mkdtempSync,writeFileSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
++ const dir=mkdtempSync(join(tmpdir(),'deploy-guard-test-'));try{
++  assert.equal(runGuard(join(dir,'missing'),false),null);
++  writeFileSync(join(dir,'dryrun-1-5.json'),'{}');writeFileSync(join(dir,'11155111-5.json'),'{}');assert.equal(runGuard(dir,false),null);   // dry runs and Sepolia do not count
++  assert.throws(()=>runGuard(dir,true),/RESUME needs exactly one/);
++  writeFileSync(join(dir,'1-7.json'),'{}');assert.throws(()=>runGuard(dir,false),/FINISHED_RUN 1-7\.json/);
++  writeFileSync(join(dir,'partial-1-8.json'),'{}');assert.throws(()=>runGuard(dir,false),/UNFINISHED_RUN partial-1-8\.json/);
++  assert.equal(runGuard(dir,true),join(dir,'partial-1-8.json'));   // a mismatch leaves both: it can be read back again
++  writeFileSync(join(dir,'partial-1-9.json'),'{}');assert.throws(()=>runGuard(dir,true),/exactly one/);
++ }finally{rmSync(dir,{recursive:true,force:true});}
++});
++
++test('every read reaches the RPC: no answer from the provider cache',async()=>{
++ const {createServer}=await import('node:http');let counted=0;
++ const server=createServer((q,r)=>{let b='';q.on('data',x=>b+=x);q.on('end',()=>{
++  const one=m=>{if(m.method==='eth_getTransactionCount')counted++;return {jsonrpc:'2.0',id:m.id,result:m.method==='eth_chainId'?'0x1':'0x5'};};
++  const j=JSON.parse(b);r.writeHead(200,{'content-type':'application/json'});r.end(JSON.stringify(Array.isArray(j)?j.map(one):one(j)));});});
++ await new Promise(r=>server.listen(0,'127.0.0.1',r));
++ const p=mainnetProvider(`http://127.0.0.1:${server.address().port}/`);
++ try{
++  const a=testAuthority(1).address;
++  assert.equal(await p.getTransactionCount(a,'latest'),5);assert.equal(await p.getTransactionCount(a,'latest'),5);
++  assert.equal(counted,2);
++ }finally{p.destroy();server.close();}
++});
++
++test('a resume funds only what is left',()=>{
++ assert.equal(gasToFund(null),45_000_000n);
++ assert.equal(gasToFund({steps:[]}),45_000_000n);
++ assert.equal(gasToFund({steps:[{name:'deploy EmberEvoGenesis'}]}),10_000_000n);
++ assert.equal(gasToFund({steps:[]},true),10_000_000n);   // the record lost the step, the chain shows the code
++});
++
++test('a resume outbids the transaction a stopped run left waiting, and survives a lagging RPC',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  let saved=null,count=0;const fake='0x'+'cd'.repeat(32);
++  const stuck=new Proxy(deployer,{get(t,k){
++   if(k==='sendTransaction')return async tx=>{if(++count>=3)return {hash:fake};return t.sendTransaction(tx);};   // from the third step on nothing lands
++   const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  await assert.rejects(deployMainnet({deployer:stuck,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:2,stepTimeoutMs:3,visibleTries:40}}),/STEP_STUCK setRevealCommit/);
++  assert.equal(saved.steps.length,2);assert.equal(saved.pending.name,'setRevealCommit');assert.ok(saved.pending.fee.maxFeePerGas);assert.equal(saved.pending.hashes[0],fake);
++  const {signer,sent}=laggingDeployer(deployer);
++  const d=await deployMainnet({deployer:signer,revealSigner:key,revealCommit:commit,cfg,resume:saved,timing:{pollMs:1,visibleTries:200,visibleReads:2,stepTimeoutMs:2000}});
++  assert.equal(d.contract,saved.contract);assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
++  assert.ok(sent[0].maxFeePerGas>=BigInt(saved.pending.fee.maxFeePerGas)*125n/100n);assert.equal(sent[0].nonce,saved.pending.nonce);
++ }finally{await rpc.disconnect();}
++});
++
++test('an RPC error while resuming is not "no code": the mined deploy is not taken for missing',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  let saved=null,count=0;
++  const failing=new Proxy(deployer,{get(t,k){
++   if(k==='sendTransaction')return async tx=>{if(++count>=2)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.sendTransaction(tx);};
++   const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  await assert.rejects(deployMainnet({deployer:failing,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:1,stepTimeoutMs:3,visibleTries:40}}),/rpc down/);
++  let errors=3;
++  const flaky=new Proxy(deployer.provider,{get(t,k){if(k==='getCode')return async a=>{if(errors-->0)throw Error('429');return t.getCode(a);};const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  const signer=new Proxy(deployer,{get(t,k){if(k==='provider')return flaky;const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  const d=await deployMainnet({deployer:signer,revealSigner:key,revealCommit:commit,cfg,resume:saved,timing:FAST});
++  assert.equal(d.contract,saved.contract);assert.deepEqual(d.readBackMismatch,[]);
++ }finally{await rpc.disconnect();}
++});
+
+--- Submission10/tools/deploy-mainnet.ps1
++++ Submission11/tools/deploy-mainnet.ps1
+@@ -6,11 +6,13 @@
+ #      paid approvals and reveals.
+ #   2. Asks for your deployer wallet address, its private key and a mainnet RPC URL (keys are not echoed, kept only in
+ #      this process, nothing secret is written to disk).
+-#   3. Checks on chain first (imdUSD, USDC, the Safe's owners and threshold, your ETH balance) and shows a summary.
+-#   4. After you type DEPLOY: deploys, locks the metadata URIs, sets the reveal commitment, adds USDC (usable in two days),
+-#      approves the paid price and hands ownership to the Safe (the Safe still has to accept it).
++#   3. Checks first, sending nothing: the local build against the reviewed one, then on chain imdUSD, USDC, the Safe's owners
++#      and threshold, your ETH balance. Shows a summary.
++#   4. After you type DEPLOY: deploys, stores the metadata URIs (not locked), sets the reveal commitment, adds USDC (usable
++#      in two days), approves the paid price and hands ownership to the Safe (the Safe still has to accept it).
++#      If a run stopped, contract\deployments holds a partial record: run this script again, it offers RESUME and sends only what is missing.
+ #   5. Writes the Safe Transaction Builder file for acceptOwnership next to the deployment record.
+-# Minting stays paused: it opens only when the Safe sets the free list and the opening time (safe-batch.mjs open).
++# Minting stays paused: it opens only when the Safe locks the URIs and sets the free list and the opening time (safe-batch.mjs open).
+ $ErrorActionPreference = 'Stop'
+ Set-Location $PSScriptRoot
+ $Safe = '0x29e7c208481f648795f677b55F6ECb2bADc2F01E'
+@@ -33,7 +35,10 @@ if (-not (Test-Path $keyFile)) {
+   if ($LASTEXITCODE -ne 0) { throw 'Could not create the mainnet signer key.' }
+   Write-Host "New mainnet signer key written to $keyFile"
+ }
+-$signer = (node --input-type=module -e "import {readFileSync} from 'node:fs';import {Wallet} from './vendor/ethers.min.js';console.log(new Wallet(readFileSync(process.argv[1],'utf8').trim()).address)" $keyFile).Trim()
++# a bad key must never reach the screen: an ethers error quotes the value it refused
++$signer = node --input-type=module -e "import {readFileSync} from 'node:fs';import {Wallet} from './vendor/ethers.min.js';try{console.log(new Wallet(readFileSync(process.argv[1],'utf8').trim()).address)}catch{process.exit(1)}" $keyFile
++if ($LASTEXITCODE -ne 0) { throw 'The mainnet signer key file is not a valid key. Nothing was sent.' }
++$signer = $signer.Trim()
+ $seedFile = Join-Path $HOME 'genesis-reveal-seed-mainnet.key'
+ if (-not (Test-Path $seedFile)) {
+   node signer/tools/new-reveal-seed.mjs mainnet | Out-Null
+@@ -44,21 +49,36 @@ $revealCommit = ((node signer/tools/new-reveal-seed.mjs mainnet --anchor) | Conv
+ Write-Host "Approval signer address: $signer"
+ Write-Host "Reveal commitment (anchor): $revealCommit"
+ 
+-# 2. Deployer and RPC, for this process only.
++# A stopped run is resumed, never deployed a second time.
++$partial = @(Get-ChildItem 'contract\deployments\partial-1-*.json' -ErrorAction SilentlyContinue)
++$modeArgs = @()
++if ($partial.Count -gt 0) {
++  Write-Host ''
++  Write-Host "An earlier run stopped: $($partial[0].Name). This run will send only the steps the chain does not show yet." -ForegroundColor Yellow
++  $modeArgs = @('--resume')
++}
++
++# 2. Deployer and RPC, for this process only. The RPC URL reaches only the two node calls that need it.
++Write-Host 'Use a fresh wallet that holds only the gas: until the Safe accepts, this key has every owner power over the contract. The pre-check refuses a wallet that has already sent transactions.'
+ $expected = (Read-Host 'Your deployer wallet ADDRESS (0x..., needs a little ETH for gas)').Trim()
+ if ($expected -notmatch '^0x[0-9a-fA-F]{40}$') { throw 'That is not a wallet address. Stopped.' }
+-$env:RPC_URL = Read-Secret 'Ethereum MAINNET RPC URL (your Alchemy HTTPS)'
++$rpcUrl = Read-Secret 'Ethereum MAINNET RPC URL (your Alchemy HTTPS)'
+ $env:DEPLOYER_PRIVATE_KEY = Read-Secret 'Deployer wallet private key'
+ try {
+-  $deployer = (node --input-type=module -e "import {Wallet} from './vendor/ethers.min.js';console.log(new Wallet(process.env.DEPLOYER_PRIVATE_KEY.trim()).address)").Trim()
++  $deployer = node --input-type=module -e "import {Wallet} from './vendor/ethers.min.js';try{console.log(new Wallet(process.env.DEPLOYER_PRIVATE_KEY.trim()).address)}catch{process.exit(1)}"
++  if ($LASTEXITCODE -ne 0) { throw 'That is not a valid private key (what you typed is not shown). Nothing was sent.' }
++  $deployer = $deployer.Trim()
+   if ($deployer.ToLower() -ne $expected.ToLower()) { throw "This key belongs to $deployer, not $expected. Stopped." }
+   $env:SIGNER_KEY_FILE = $keyFile
+   $env:REVEAL_COMMIT = $revealCommit
+ 
+-  # 3. On-chain checks, nothing sent.
++  # 3. Build and on-chain checks, nothing sent.
+   $env:PREFLIGHT_ONLY = '1'
+-  node --import $RuntimeHook contract/tools/deploy-mainnet.mjs
+-  if ($LASTEXITCODE -ne 0) { throw "Pre-check failed (exit $LASTEXITCODE). Nothing was sent." }
++  $env:RPC_URL = $rpcUrl
++  node --import $RuntimeHook contract/tools/deploy-mainnet.mjs @modeArgs
++  $checkExit = $LASTEXITCODE
++  Remove-Item Env:RPC_URL
++  if ($checkExit -ne 0) { throw "Pre-check failed (exit $checkExit). Nothing was sent." }
+   Remove-Item Env:PREFLIGHT_ONLY
+ 
+   Write-Host ''
+@@ -68,21 +88,33 @@ try {
+   Write-Host '  contract        EmberEvoGenesis, name "Ember Evo Genesis", symbol EGEN, 1,688 max'
+   Write-Host '  price           20 imdUSD + 1,200 GOLD; USDC 20 + 1,600 GOLD usable two days after this deploy'
+   Write-Host "  payments to     $Safe (EmberEvo Treasury Safe, 2 of 3)"
+-  Write-Host '  metadata        https://genesis.imdember.com/meta/  (LOCKED forever)'
++  Write-Host '  metadata        https://genesis.imdember.com/meta/  (locks only when the Safe opens minting)'
+   Write-Host "  new owner       $Safe (after the Safe signs acceptOwnership)"
+   Write-Host '  minting         stays paused until the Safe sets the free list and the opening time'
+-  if ((Read-Host 'Type DEPLOY to send these six transactions') -ne 'DEPLOY') { throw 'Cancelled. Nothing was sent.' }
++  if ($modeArgs.Count -gt 0) {
++    if ((Read-Host 'Type RESUME to send only the missing transactions') -ne 'RESUME') { throw 'Cancelled. Nothing was sent.' }
++  } else {
++    if ((Read-Host 'Type DEPLOY to send these six transactions') -ne 'DEPLOY') { throw 'Cancelled. Nothing was sent.' }
++  }
+ 
+   # 4. Deploy and set up.
+-  node --import $RuntimeHook contract/tools/deploy-mainnet.mjs
+-  if ($LASTEXITCODE -ne 0) { throw "Deploy script stopped (exit $LASTEXITCODE). Copy the output above to Claude; do not run this again before checking." }
++  $env:RPC_URL = $rpcUrl
++  node --import $RuntimeHook contract/tools/deploy-mainnet.mjs @modeArgs
++  $deployExit = $LASTEXITCODE
++  Remove-Item Env:RPC_URL
++  if ($deployExit -eq 2) { throw 'The run finished but a value read back from the chain differs (readBackMismatch above). Do not sign anything in the Safe before checking it.' }
++  if ($deployExit -ne 0) { throw "Deploy script stopped (exit $deployExit, last step above). Its progress is saved in contract\deployments\partial-1-*.json. Check the deployer on Etherscan, then run this script again: it offers RESUME. Share only the error above and that file, never your RPC URL." }
+ } finally {
+-  Remove-Item Env:RPC_URL, Env:DEPLOYER_PRIVATE_KEY, Env:SIGNER_KEY_FILE, Env:PREFLIGHT_ONLY -ErrorAction SilentlyContinue
++  $rpcUrl = $null
++  Remove-Item Env:RPC_URL, Env:DEPLOYER_PRIVATE_KEY, Env:SIGNER_KEY_FILE, Env:REVEAL_COMMIT, Env:PREFLIGHT_ONLY -ErrorAction SilentlyContinue
+ }
+ 
+-# 5. Safe Transaction Builder file for acceptOwnership.
++# 5. Safe Transaction Builder file for acceptOwnership (reads the chain through a public RPC: no secret needed from here on).
+ $record = Get-ChildItem 'contract\deployments\1-*.json' | Where-Object { $_.Name -notmatch '\.safe-' -and $_.Name -notmatch 'snapshot' } | Sort-Object LastWriteTime | Select-Object -Last 1
+ node --import $RuntimeHook contract/tools/safe-batch.mjs accept $record.FullName
++if ($LASTEXITCODE -ne 0) { throw "Could not write the acceptOwnership file (exit $LASTEXITCODE). Run: node --import `"$RuntimeHook`" contract/tools/safe-batch.mjs accept `"$($record.FullName)`"" }
+ Write-Host ''
+ Write-Host "Done. Record: $($record.FullName)" -ForegroundColor Green
++Write-Host 'NOT finished until the Safe signs acceptOwnership: until then this deployer key still owns the contract.' -ForegroundColor Yellow
++Write-Host 'Do it now, then check with: safe-batch.mjs status <record> (owner must be the Safe). Treat the deployer key as burned afterwards.'
+ Write-Host 'Next: back up the two key files in your home folder offline, then tell Claude "deployed".'
+
+--- Submission10/tools/deploy-mainnet.mjs
++++ Submission11/tools/deploy-mainnet.mjs
+@@ -1,22 +1,28 @@
+ // Ethereum mainnet deployment of EmberEvoGenesis (owner 2026-11-01). Everything the deployer key can do alone, in one run:
+-//   deploy (owner = the deployer, so the setup below needs no multisig round) -> setRevealURIs(pending, base, locked)
++//   deploy (owner = the deployer, so the setup below needs no multisig round) -> setRevealURIs(pending, base, not locked)
+ //   -> setRevealCommit (the signer's acceptance names a block 2 below the head; it must land within 256 blocks, which a
+ //   2-of-3 Safe could miss) -> addPaymentToken(USDC, 1,600 GOLD; usable two days later) -> approvePaidPrice
+-//   -> transferOwnership(Safe). Minting stays paused: it cannot open without the free-list snapshot, which the Safe sets
+-//   later together with the opening (contract/tools/safe-batch.mjs open), after it accepts ownership (safe-batch.mjs accept).
++//   -> transferOwnership(Safe). Minting stays paused: it cannot open without the free-list snapshot and the locked URIs, which
++//   the Safe sets later together with the opening (contract/tools/safe-batch.mjs open), after it accepts ownership (safe-batch.mjs accept).
+ //
+ //   Dry run on a simulated chain with chainId 1 (stand-in tokens, a stand-in Safe address):  node contract/tools/deploy-mainnet.mjs --dry-run
+ //   Mainnet (deploy-mainnet.ps1 asks for the secrets and sets): RPC_URL, DEPLOYER_PRIVATE_KEY, SIGNER_KEY_FILE,
+ //     REVEAL_COMMIT (anchor of the mainnet reveal seed). Every other parameter is fixed below and checked on chain first.
+-import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
++//   A run that stopped leaves contract/deployments/partial-1-<time>.json; --resume reads the chain and sends only what is missing.
++import {readFileSync,writeFileSync,mkdirSync,readdirSync,renameSync,rmSync} from 'node:fs';
+ import {fileURLToPath} from 'node:url';
+-import {resolve} from 'node:path';
++import {resolve,join} from 'node:path';
++import {createHash} from 'node:crypto';
+ import {ethers,createTestProvider,testAuthority} from './runtime.mjs';
++import {reportFailure} from './tool-errors.mjs';
+ import {revealChain,signRevealCommit} from '../../signer/reveal-chain.mjs';
++import {METADATA_BASE_RE} from '../../signer/free-approval.mjs';
+ import {GENESIS} from './deploy-testnet.mjs';
+ 
+ const artifacts=JSON.parse(readFileSync(new URL('../artifacts/test-artifacts.private.json',import.meta.url),'utf8'));
+-const LOW128=(1n<<128n)-1n;
++const LOW128=(1n<<128n)-1n,PAYMENT_TOKEN_DELAY=2*86400;
++const sha256=hex=>createHash('sha256').update(Buffer.from(hex.replace(/^0x/,''),'hex')).digest('hex');
++const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+ export const MAINNET=Object.freeze({
+  chainId:1,
+  imdUSD:'0x61aAF8a992A3143e2B0C9cB0030b9fE702854a25',   // imdUSD v1, 18 decimals (Etherscan-verified plain ERC-20)
+@@ -28,57 +34,231 @@ export const MAINNET=Object.freeze({
+  symbol:'EGEN',name:'Ember Evo Genesis',
+  metadataBase:'https://genesis.imdember.com/meta/',
+  pendingURI:'https://genesis.imdember.com/meta/pending.json',
++ // the build published as Genesis Submission 11 (build/build-receipt.json), pinned here so a re-compile cannot move it. It differs
++ // from the build Swarm audited as Submission 10 only in the 32 metadata-hash bytes: the @notice comment changed (audit 90ae2f92 finding 8).
++ reviewed:Object.freeze({
++  initcodeSha256:'388bfd2effddf5feccc0591cadd5c961f89d3222793a26f82ee365937a39e3d2',
++  runtimeSha256:'5f6b7f0e5f4f9cc395cb291aa6cc82f03d5c6acb5a3455d18bb4c06490f67ff9',
++  abiSha256:'91a76770538dc4e0fc7b2e47d7fb316ff00e2a569569a92abf5fb4be1835f035',
++  runtimeBytes:24427}),
+ });
++export const localBuild=()=>artifacts[GENESIS];
++/** ethers answers a repeated read from a 250 ms cache by default: every read here must reach the RPC. */
++export const mainnetProvider=url=>new ethers.JsonRpcProvider(url,undefined,{cacheTimeout:-1});
++/** A stopped run is resumed and a finished one stays finished: neither may deploy a second contract. Returns the partial record to resume. */
++export function runGuard(dir,resuming){
++ let names=[];try{names=readdirSync(dir);}catch{}
++ const partials=names.filter(n=>/^partial-1-\d+\.json$/.test(n)).sort(),finished=names.filter(n=>/^1-\d+\.json$/.test(n)).sort();
++ if(resuming){if(partials.length!==1)throw Error('RESUME needs exactly one partial record, found '+partials.length);return join(dir,partials[0]);}
++ if(partials.length)throw Error('UNFINISHED_RUN '+partials.join(',')+': resume it, do not deploy a second contract');
++ if(finished.length)throw Error('FINISHED_RUN '+finished.join(',')+': a mainnet deployment is already recorded, do not deploy a second contract. For the Safe file run safe-batch.mjs accept with that record');
++ return null;
++}
++/** Gas the deployer must be able to pay: the deployment is nearly all of it. */
++export const gasToFund=(resume,deployed=false)=>deployed||resume?.steps?.some(x=>x.name==='deploy EmberEvoGenesis')?10_000_000n:45_000_000n;
+ 
+-/** The deployer-only part of the mainnet setup; returns the record (every value read back from the chain). */
+-export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAINNET,log=()=>{}}){
++/** Stops before anything is sent when the local artifact is not the reviewed build (Swarm audit 90ae2f92 finding 1). */
++export function verifyBuild(build,cfg=MAINNET){
++ const r=cfg.reviewed,bad=[];
++ if(sha256(build.bytecode)!==r.initcodeSha256)bad.push('initcode');
++ if(sha256(build.runtimeBytecode)!==r.runtimeSha256)bad.push('runtime');
++ if(createHash('sha256').update(JSON.stringify(build.abi)).digest('hex')!==r.abiSha256)bad.push('abi');
++ if((build.runtimeBytecode.length-2)/2!==r.runtimeBytes)bad.push('runtimeBytes');
++ if(bad.length)throw Error('BUILD_NOT_REVIEWED '+bad.join(','));
++}
++/** The deployed code against the compiler's runtime: only immutables may differ, and those are 32 zero bytes in the template. */
++export function runtimeMatches(template,code){
++ const t=ethers.getBytes(template),c=ethers.getBytes(code);
++ if(t.length!==c.length)return {ok:false,immutableRuns:0};
++ let runs=0;
++ for(let i=0;i<t.length;i++){
++  if(t[i]===c[i])continue;
++  if(t[i]!==0)return {ok:false,immutableRuns:runs};
++  let s=i,e=i;while(s>0&&t[s-1]===0)s--;while(e<t.length&&t[e]===0)e++;
++  if(e-s<32)return {ok:false,immutableRuns:runs};
++  runs++;i=e-1;
++ }
++ return {ok:true,immutableRuns:runs};
++}
++/** The strings are stored as given: a wrong base breaks every token URI (Swarm audit 90ae2f92 finding 5). */
++export function validateUris(cfg){
++ if(typeof cfg.metadataBase!=='string'||!METADATA_BASE_RE.test(cfg.metadataBase))throw Error('METADATA_BASE_INVALID');
++ if(typeof cfg.pendingURI!=='string'||!cfg.pendingURI.startsWith(cfg.metadataBase)||/\s/.test(cfg.pendingURI))throw Error('PENDING_URI_INVALID');
++}
++
++/** The deployer-only part of the mainnet setup; returns the record (every value read back from the chain).
++ *  Each transaction has a fixed nonce, so a resend can only replace it, never add a second one. A load-balanced RPC can
++ *  answer from a node behind the others (2026-10-29 rehearsal; Swarm audit 90ae2f92 finding 2), so nothing below trusts one read.
++ *  checkpoint(state) is called before each send; resume is such a state: what the chain already shows is not sent again. */
++export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAINNET,build=localBuild(),log=()=>{},checkpoint=()=>{},resume=null,
++ timing:{pollMs=2000,stepTimeoutMs=5*60_000,attempts=8,visibleReads=3,visibleTries=90}={}}){
+  const provider=deployer.provider,{chainId}=await provider.getNetwork();
+  if(chainId!==BigInt(cfg.chainId))throw Error('WRONG_CHAIN '+chainId);
+  if(!/^0x[0-9a-fA-F]{64}$/.test(revealCommit??'')||BigInt(revealCommit)===0n)throw Error('REVEAL_COMMIT_INVALID');
+  if(!revealSigner)throw Error('REVEAL_SIGNER_REQUIRED');
+  const signerAddress=ethers.getAddress(await revealSigner.getAddress()),owner=await deployer.getAddress();
+  if(signerAddress===owner)throw Error('SIGNER_IS_DEPLOYER');   // separate secrets (audit README section 7)
+- const steps=[];
+- const record=async(name,tx)=>{const rc=await tx.wait();if(rc.status!==1)throw Error('TX_FAILED '+name);steps.push({name,hash:tx.hash,gasUsed:rc.gasUsed.toString()});log(name,tx.hash);return rc;};
+- // a load-balanced RPC can answer from a node that has not seen the block yet (2026-10-29 rehearsal)
+- async function codeVisible(address){
+-  for(let i=0,seen=0;i<90;i++){if((await provider.getCode(address))!=='0x'){if(++seen>=3)return;}else seen=0;await new Promise(r=>setTimeout(r,2000));}
+-  throw Error('CODE_NOT_VISIBLE '+address);
++ verifyBuild(build,cfg);validateUris(cfg);
++ const retry=async(read,tries=visibleTries)=>{
++  let last;
++  for(let i=0;i<tries;i++){try{return await read();}catch(e){last=e;await sleep(pollMs);}}
++  throw last;
++ };
++ const stableNonce=async()=>{
++  for(let i=0;i<visibleTries;i++){
++   const a=await provider.getTransactionCount(owner,'latest').catch(()=>null),b=a===null?null:await provider.getTransactionCount(owner,'latest').catch(()=>null);
++   if(a!==null&&a===b)return a;
++   await sleep(pollMs);
++  }
++  throw Error('NONCE_NOT_STABLE');
++ };
++ let nonce=await stableNonce(),contract,planNonce;
++ if(resume){
++  if(ethers.getAddress(resume.deployer)!==owner)throw Error('RESUME_OTHER_DEPLOYER');
++  if(resume.revealCommit!==revealCommit)throw Error('RESUME_OTHER_REVEAL_COMMIT');
++  if(ethers.getAddress(resume.signer)!==signerAddress)throw Error('RESUME_OTHER_SIGNER');
++  contract=ethers.getAddress(resume.contract);planNonce=resume.planNonce;
++ }else{planNonce=nonce;contract=ethers.getCreateAddress({from:owner,nonce});}
++ const steps=[...(resume?.steps??[])];
++ const state=extra=>({deployer:owner,signer:signerAddress,revealCommit,contract,planNonce,steps,...extra});
++ const seed=resume?.pending??null;   // a transaction a stopped run left waiting: it may still land, and a replacement must outbid it
++ const feeText=f=>f?.maxFeePerGas==null?null:{maxFeePerGas:String(f.maxFeePerGas),maxPriorityFeePerGas:String(f.maxPriorityFeePerGas)};
++
++ const fees=async last=>{
++  const f=await provider.getFeeData();
++  if(f.maxFeePerGas==null)return {};
++  const up=(v,prev)=>{const bumped=prev==null?0n:prev*125n/100n+1n;return v>bumped?v:bumped;};
++  return {maxFeePerGas:up(f.maxFeePerGas,last?.maxFeePerGas),maxPriorityFeePerGas:up(f.maxPriorityFeePerGas??0n,last?.maxPriorityFeePerGas)};
++ };
++ const firstReceipt=async(hashes,ms)=>{
++  const end=Date.now()+ms;
++  do{for(const h of hashes){const rc=await provider.getTransactionReceipt(h).catch(()=>null);if(rc)return rc;}await sleep(pollMs);}while(Date.now()<end);
++  return null;
++ };
++ const settled=async rc=>{   // the block must be visible over several reads before the next step reads state from it
++  for(let i=0,seen=0;i<visibleTries;i++){
++   const n=await provider.getBlockNumber().catch(()=>-1),r=await provider.getTransactionReceipt(rc.hash).catch(()=>null);
++   if(n>=rc.blockNumber&&r){if(++seen>=visibleReads)return;}else seen=0;
++   await sleep(pollMs);
++  }
++  throw Error('RECEIPT_NOT_VISIBLE '+rc.hash);
++ };
++ // a node that has not seen the contract estimates a plain transfer: the floor keeps such an estimate from running out of gas
++ const gasLimit=async request=>{const g=await deployer.estimateGas(request)*12n/10n;return g>300_000n?g:300_000n;};
++ /** One step at its nonce. A send that fails or waits too long is rebuilt and resent, with a higher fee, at the same nonce. */
++ async function send(name,request,{revertRetries=0}={}){
++  let hashes=[],last=null,lastError=null;
++  if(seed&&seed.name===name&&seed.nonce===nonce){hashes=[...seed.hashes];if(seed.fee)last={maxFeePerGas:BigInt(seed.fee.maxFeePerGas),maxPriorityFeePerGas:BigInt(seed.fee.maxPriorityFeePerGas)};}
++  for(let a=0;a<attempts;a++){
++   let sent=false;
++   try{
++    const fee=await fees(last),req=await request(),tx=await deployer.sendTransaction({...req,gasLimit:await gasLimit(req),nonce,...fee});
++    hashes.push(tx.hash);last=fee;sent=true;log(name,tx.hash);
++    checkpoint(state({pending:{name,nonce,hashes,fee:feeText(last)}}));
++   }catch(e){lastError=e;}
++   const rc=hashes.length?await firstReceipt(hashes,sent?stepTimeoutMs:pollMs*3):(await sleep(pollMs*3),null);
++   if(!rc)continue;
++   await settled(rc);nonce++;
++   if(rc.status!==1){
++    if(revertRetries-->0){hashes=[];last=null;continue;}
++    checkpoint(state());throw Error('TX_FAILED '+name);
++   }
++   steps.push({name,hash:rc.hash,gasUsed:rc.gasUsed.toString(),blockNumber:rc.blockNumber});
++   checkpoint(state());
++   return rc;
++  }
++  checkpoint(state({pending:{name,nonce,hashes,fee:feeText(last)}}));
++  throw lastError&&!hashes.length?lastError:Error('STEP_STUCK '+name);
+  }
++ // a block 2 below the head, read from one head and twice the same hash (a lagging or forked node cannot name it)
++ async function recentBlock(){
++  for(let i=0;i<visibleTries;i++){
++   const head=await provider.getBlock('latest').catch(()=>null);
++   if(head&&head.number>=2){const a=await provider.getBlock(head.number-2).catch(()=>null),b=a&&await provider.getBlock(head.number-2).catch(()=>null);if(a&&b&&a.hash===b.hash)return a;}
++   await sleep(pollMs);
++  }
++  throw Error('COMMIT_BLOCK_NOT_VISIBLE');
++ }
++ const stepBlock=name=>steps.find(s=>s.name===name)?.blockNumber;
++
+  const genesisArgs=[owner,ethers.getAddress(cfg.imdUSD),signerAddress,ethers.getAddress(cfg.safe),cfg.paidCost,cfg.goldCost,cfg.symbol];
+- const factory=new ethers.ContractFactory(artifacts[GENESIS].abi,artifacts[GENESIS].bytecode,deployer);
+- const genesis=await factory.deploy(...genesisArgs);
+- const deployRc=await record('deploy EmberEvoGenesis',genesis.deploymentTransaction());
+- const contract=await genesis.getAddress();await codeVisible(contract);
+- await record('setRevealURIs (locked)',await genesis.setRevealURIs(cfg.pendingURI,cfg.metadataBase,true));
+- const commitBlock=await provider.getBlock((await provider.getBlockNumber())-2);
+- const acceptance=await signRevealCommit({signer:revealSigner,chainId,contractAddress:contract,commit:revealCommit,previous:await genesis.revealCommit(),signerEpoch:await genesis.signerEpoch(),block:commitBlock});
+- await record('setRevealCommit',await genesis.setRevealCommit(revealCommit,commitBlock.number,acceptance));
+- await record('addPaymentToken(USDC, 1600 GOLD)',await genesis.addPaymentToken(ethers.getAddress(cfg.usdc),cfg.usdcGoldCost));
+- await record('approvePaidPrice',await genesis.approvePaidPrice());
+- await record('transferOwnership(Safe)',await genesis.transferOwnership(ethers.getAddress(cfg.safe)));
++ const factory=new ethers.ContractFactory(build.abi,build.bytecode,deployer);
++ const genesis=new ethers.Contract(contract,build.abi,deployer);
++ const hasCode=()=>provider.getCode(contract).then(c=>c!=='0x').catch(()=>false);
++ // a load-balanced RPC can answer from a node that has not seen the block yet
++ async function codeVisible(){
++  for(let i=0,seen=0;i<visibleTries;i++){if(await hasCode()){if(++seen>=visibleReads)return;}else seen=0;await sleep(pollMs);}
++  throw Error('CODE_NOT_VISIBLE '+contract);
++ }
++ // an RPC error is not "no code", and on a resume one empty answer may be a lagging node
++ const codeAbsent=async()=>{for(let i=0;i<(resume?10:1);i++){if(await retry(()=>provider.getCode(contract))!=='0x')return false;if(resume)await sleep(pollMs);}return true;};
++ checkpoint(state(seed?{pending:seed}:{}));
++ if(await codeAbsent()){
++  if(nonce!==planNonce)throw Error('PLANNED_NONCE_USED no code at '+contract+' but the deployer has sent transactions since the plan. Open the deployer on Etherscan: if the contract exists, wait and resume; if the deploy reverted or another transaction took its nonce, archive this partial record by hand and start again');
++  const rc=await send('deploy EmberEvoGenesis',()=>factory.getDeployTransaction(...genesisArgs));
++  if(rc.contractAddress&&ethers.getAddress(rc.contractAddress)!==contract)throw Error('DEPLOYED_ELSEWHERE '+rc.contractAddress);
++ }
++ await codeVisible();
++ if(resume){   // the record says this deployer set the contract up; the chain has the last word
++  if(steps.length)await settled({hash:steps.at(-1).hash,blockNumber:steps.at(-1).blockNumber});   // no read below may be older than the record
++  await retry(async()=>{if(!runtimeMatches(build.runtimeBytecode,await provider.getCode(contract)).ok)throw Error('RESUME_CODE_NOT_REVIEWED');});
++  const o=await retry(()=>genesis.owner());if(ethers.getAddress(o)!==owner)throw Error('RESUME_NOT_OWNER '+o);
++ }
++ if(!await retry(async()=>await genesis.revealBaseURI()===cfg.metadataBase&&await genesis.pendingURI()===cfg.pendingURI))
++  await send('setRevealURIs (not locked)',()=>genesis.setRevealURIs.populateTransaction(cfg.pendingURI,cfg.metadataBase,false));
++ if((await retry(()=>genesis.revealCommit())).toLowerCase()!==revealCommit.toLowerCase())
++  // the acceptance is valid only while blockhash() knows its block: every resend signs a fresh one
++  await send('setRevealCommit',async()=>{
++   const block=await recentBlock();
++   const acceptance=await signRevealCommit({signer:revealSigner,chainId,contractAddress:contract,commit:revealCommit,previous:await genesis.revealCommit(),signerEpoch:await genesis.signerEpoch(),block});
++   return genesis.setRevealCommit.populateTransaction(revealCommit,block.number,acceptance);
++  },{revertRetries:2});
++ if(await retry(()=>genesis.paymentTokens(ethers.getAddress(cfg.usdc)))===0n)
++  await send('addPaymentToken(USDC, 1600 GOLD)',()=>genesis.addPaymentToken.populateTransaction(ethers.getAddress(cfg.usdc),cfg.usdcGoldCost));
++ if(!await retry(()=>genesis.paidPriceApproved()))
++  await send('approvePaidPrice',()=>genesis.approvePaidPrice.populateTransaction());
++ if(ethers.getAddress(await retry(()=>genesis.pendingOwner()))!==ethers.getAddress(cfg.safe))
++  await send('transferOwnership(Safe)',()=>genesis.transferOwnership.populateTransaction(ethers.getAddress(cfg.safe)));
+ 
+  // read back everything the next steps (Safe, signer Worker, World GOLD book, Etherscan) depend on
+- const readToken=async t=>{const p=await genesis.paymentTokens(t);return {token:ethers.getAddress(t),amount:(p&LOW128).toString(),goldCost:((p>>128n)&((1n<<88n)-1n)).toString(),usableAt:Number(p>>216n)};};
+- const paymentTokens=[await readToken(cfg.imdUSD),await readToken(cfg.usdc)];
+- const got={name:await genesis.name(),symbol:await genesis.symbol(),owner:await genesis.owner(),pendingOwner:await genesis.pendingOwner(),
+-  recipient:await genesis.paymentRecipient(),signer:await genesis.appearanceSigner(),paidCost:(await genesis.paidCost()).toString(),goldCost:(await genesis.paidGoldCost()).toString(),
+-  mintPaused:await genesis.mintPaused(),paidPriceApproved:await genesis.paidPriceApproved(),revealURIsLocked:await genesis.revealURIsLocked(),
+-  revealCommit:await genesis.revealCommit(),pendingURI:await genesis.pendingURI(),metadataBase:await genesis.revealBaseURI(),maxSupply:(await genesis.maxSupply()).toString(),
+-  snapshotConfigured:await genesis.snapshotConfigured(),domainVersion:(await genesis.eip712Domain())[2],domainName:(await genesis.eip712Domain())[1]};
++ const deployBlock=stepBlock('deploy EmberEvoGenesis')??Number(await retry(()=>genesis.startBlock()));
++ const addBlock=stepBlock('addPaymentToken(USDC, 1600 GOLD)');
++ const usdcUsableAt=addBlock!==undefined?(await retry(async()=>{const b=await provider.getBlock(addBlock);if(!b)throw Error('BLOCK_NOT_VISIBLE '+addBlock);return b;})).timestamp+PAYMENT_TOKEN_DELAY:null;
++ const read=f=>retry(()=>genesis[f](),5);   // one read a lagging node cannot answer must not cost the whole pass below
++ const readToken=async t=>{const p=await retry(()=>genesis.paymentTokens(t),5);return {token:ethers.getAddress(t),amount:(p&LOW128).toString(),goldCost:((p>>128n)&((1n<<88n)-1n)).toString(),usableAt:Number(p>>216n)};};
+  const expect={name:cfg.name,symbol:cfg.symbol,owner,pendingOwner:ethers.getAddress(cfg.safe),recipient:ethers.getAddress(cfg.safe),signer:signerAddress,
+-  paidCost:cfg.paidCost.toString(),goldCost:cfg.goldCost.toString(),mintPaused:true,paidPriceApproved:true,revealURIsLocked:true,revealCommit,
+-  pendingURI:cfg.pendingURI,metadataBase:cfg.metadataBase,maxSupply:'1688',snapshotConfigured:false,domainVersion:'7',domainName:'EmberEvoGenesisCandidate'};
+- const mismatch=Object.keys(expect).filter(k=>String(got[k]).toLowerCase()!==String(expect[k]).toLowerCase());
+- if(paymentTokens[0].amount!==cfg.paidCost.toString()||paymentTokens[0].goldCost!==cfg.goldCost.toString())mismatch.push('paymentTokens(imdUSD)');
+- if(paymentTokens[1].amount!==(cfg.paidCost/10n**12n).toString()||paymentTokens[1].goldCost!==cfg.usdcGoldCost.toString())mismatch.push('paymentTokens(USDC)');
+- const code=await provider.getCode(contract),codeHash=ethers.keccak256(code);
+- return {chainId:Number(chainId),contract,deployBlock:deployRc.blockNumber,startBlock:Number(await genesis.startBlock()),owner:got.owner,pendingOwner:got.pendingOwner,
++  paidCost:cfg.paidCost.toString(),goldCost:cfg.goldCost.toString(),mintPaused:true,paidPriceApproved:true,revealURIsLocked:false,revealCommit,
++  pendingURI:cfg.pendingURI,metadataBase:cfg.metadataBase,maxSupply:'1688',snapshotConfigured:false,domainVersion:'7',domainName:'EmberEvoGenesisCandidate',
++  domainChainId:String(chainId),domainContract:contract,signerEpoch:'1',startBlock:String(deployBlock),runtimeBytes:String(cfg.reviewed.runtimeBytes)};
++ let got,paymentTokens,code,codeCheck,mismatch,readError;
++ for(let i=0;i<10;i++){   // a mismatch from a lagging node clears; a real one stays and is returned
++  try{
++   const domain=await read('eip712Domain');
++   paymentTokens=[await readToken(cfg.imdUSD),await readToken(cfg.usdc)];code=await retry(()=>provider.getCode(contract),5);codeCheck=runtimeMatches(build.runtimeBytecode,code);
++   got={name:await read('name'),symbol:await read('symbol'),owner:await read('owner'),pendingOwner:await read('pendingOwner'),
++    recipient:await read('paymentRecipient'),signer:await read('appearanceSigner'),paidCost:(await read('paidCost')).toString(),goldCost:(await read('paidGoldCost')).toString(),
++    mintPaused:await read('mintPaused'),paidPriceApproved:await read('paidPriceApproved'),revealURIsLocked:await read('revealURIsLocked'),
++    revealCommit:await read('revealCommit'),pendingURI:await read('pendingURI'),metadataBase:await read('revealBaseURI'),maxSupply:(await read('maxSupply')).toString(),
++    snapshotConfigured:await read('snapshotConfigured'),domainVersion:domain[2],domainName:domain[1],domainChainId:domain[3].toString(),domainContract:domain[4],
++    signerEpoch:(await read('signerEpoch')).toString(),startBlock:(await read('startBlock')).toString(),runtimeBytes:String((code.length-2)/2)};
++  }catch(e){readError=e;await sleep(pollMs);continue;}
++  mismatch=Object.keys(expect).filter(k=>String(got[k]).toLowerCase()!==String(expect[k]).toLowerCase());
++  if(!codeCheck.ok)mismatch.push('runtime');
++  if(paymentTokens[0].amount!==cfg.paidCost.toString()||paymentTokens[0].goldCost!==cfg.goldCost.toString())mismatch.push('paymentTokens(imdUSD)');
++  if(paymentTokens[1].amount!==(cfg.paidCost/10n**12n).toString()||paymentTokens[1].goldCost!==cfg.usdcGoldCost.toString())mismatch.push('paymentTokens(USDC)');
++  if(usdcUsableAt!==null&&paymentTokens[1].usableAt!==usdcUsableAt)mismatch.push('paymentTokens(USDC).usableAt');
++  if(!mismatch.length)break;
++  await sleep(pollMs);
++ }
++ if(!got)throw readError;
++ const codeHash=ethers.keccak256(code);
++ return {chainId:Number(chainId),contract,deployBlock,startBlock:Number(got.startBlock),owner:got.owner,pendingOwner:got.pendingOwner,
+   safe:ethers.getAddress(cfg.safe),token:ethers.getAddress(cfg.imdUSD),usdc:ethers.getAddress(cfg.usdc),paymentTokens,recipient:got.recipient,signer:signerAddress,
+-  symbol:got.symbol,name:got.name,pendingURI:got.pendingURI,metadataBase:got.metadataBase,revealCommit,paidCost:got.paidCost,goldCost:got.goldCost,
++  symbol:got.symbol,name:got.name,pendingURI:got.pendingURI,metadataBase:got.metadataBase,revealURIsLocked:got.revealURIsLocked,revealCommit,paidCost:got.paidCost,goldCost:got.goldCost,
+   domainVersion:got.domainVersion,maxSupply:got.maxSupply,mintPaused:got.mintPaused,snapshotConfigured:false,codeHash,runtimeBytes:(code.length-2)/2,
++  reviewedBuild:{initcodeSha256:cfg.reviewed.initcodeSha256,runtimeSha256:cfg.reviewed.runtimeSha256,immutableRuns:codeCheck.immutableRuns},
+   readBackMismatch:mismatch,steps,totalGas:steps.reduce((a,s)=>a+BigInt(s.gasUsed),0n).toString(),
+-  etherscan:{contractName:GENESIS,compiler:'v0.8.38+commit.1835d247',constructorArgsHex:genesis.interface.encodeDeploy(genesisArgs).slice(2)}};
++  etherscan:{contractName:GENESIS,compiler:'v0.8.38+commit.1835d247',constructorArgsHex:factory.interface.encodeDeploy(genesisArgs).slice(2)}};
+ }
+ 
+ /** The World GOLD book registry entry (server/genesis-deployments.ts, World 7d09bda format), from the read-backs. */
+@@ -91,10 +271,12 @@ export function mainnetGoldBookEntry(d){
+ }
+ 
+ /** Checks the fixed mainnet parameters against the chain before anything is sent. */
+-export async function preflight(provider,deployerAddress,signerAddress,cfg=MAINNET){
++export async function preflight(provider,deployerAddress,signerAddress,cfg=MAINNET,build=localBuild(),resume=null,{allowUsedDeployer=false}={}){
+  const E=['function symbol() view returns (string)','function decimals() view returns (uint8)'];
+  const S=['function getOwners() view returns (address[])','function getThreshold() view returns (uint256)','function VERSION() view returns (string)'];
+  const out={};
++ verifyBuild(build,cfg);validateUris(cfg);
++ out.reviewedBuild=cfg.reviewed.runtimeSha256;
+  if((await provider.getNetwork()).chainId!==1n)throw Error('RPC_URL is not Ethereum mainnet');
+  const im=new ethers.Contract(cfg.imdUSD,E,provider),us=new ethers.Contract(cfg.usdc,E,provider);
+  if(await im.symbol()!=='imdUSD'||await im.decimals()!==18n)throw Error('imdUSD check failed');
+@@ -105,40 +287,55 @@ export async function preflight(provider,deployerAddress,signerAddress,cfg=MAINN
+  out.safe=`${cfg.safe} v${await safe.VERSION()} ${cfg.safeThreshold} of ${owners.length}`;
+  if(ethers.getAddress(signerAddress)===ethers.getAddress(deployerAddress))throw Error('the approval signer must not be the deployer');
+  if(want.includes(ethers.getAddress(signerAddress)))throw Error('the approval signer must not be a Safe owner');
++ if(want.includes(ethers.getAddress(deployerAddress)))throw Error('the deployer must be a fresh wallet, not a Safe owner');
+  const bal=await provider.getBalance(deployerAddress),fee=await provider.getFeeData();
+  out.deployerEth=ethers.formatEther(bal);out.maxFeeGwei=ethers.formatUnits(fee.maxFeePerGas??fee.gasPrice??0n,'gwei');
++ out.deployerNonce=await provider.getTransactionCount(deployerAddress,'latest');
++ // the local records can be lost with a drive: the chain still shows this wallet has sent transactions, maybe a whole deployment
++ if(!resume&&out.deployerNonce!==0&&!allowUsedDeployer)throw Error(`DEPLOYER_NOT_FRESH this wallet has already sent ${out.deployerNonce} transactions. Check it on Etherscan: if it deployed this contract, restore contract/deployments and resume, do not deploy a second contract. Otherwise use a fresh wallet, or set ALLOW_USED_DEPLOYER=1`);
+  // about 6.3M gas for the six transactions today (Osaka pricing; ~40M if EIP-8037 is live): refuse a wallet that cannot pay 45M at maxFee
+- out.needEth=ethers.formatEther(45_000_000n*(fee.maxFeePerGas??fee.gasPrice??0n));
+- if(bal<45_000_000n*(fee.maxFeePerGas??fee.gasPrice??0n))throw Error(`deployer has ${out.deployerEth} ETH, needs about ${out.needEth}`);
++ const deployed=resume?.contract?await provider.getCode(resume.contract)!=='0x':false;
++ const need=gasToFund(resume,deployed)*(fee.maxFeePerGas??fee.gasPrice??0n);
++ out.needEth=ethers.formatEther(need);
++ if(bal<need)throw Error(`deployer has ${out.deployerEth} ETH, needs about ${out.needEth}`);
+  return out;
+ }
+ 
+ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+- const dry=process.argv.includes('--dry-run');
+- let deployer,revealSigner,revealCommit,cfg=MAINNET,close=()=>{};
+- if(dry){
+-  const rpc=await createTestProvider(1),provider=new ethers.BrowserProvider(rpc,undefined,{cacheTimeout:-1});
+-  deployer=await provider.getSigner(0);close=()=>rpc.disconnect();revealSigner=testAuthority(1);
+-  revealCommit=revealChain(ethers.keccak256(ethers.toUtf8Bytes('ember-evo-genesis MAINNET DRY RUN reveal chain'))).anchor;
+-  // local fixtures (the Sepolia test tokens refuse chainId 1): 18 decimals for imdUSD, 6 for USDC
+-  const dep=async(k,...a)=>{const c=await new ethers.ContractFactory(artifacts[k].abi,artifacts[k].bytecode,deployer).deploy(await deployer.getAddress(),...a);await c.waitForDeployment();return c.getAddress();};
+-  cfg={...MAINNET,imdUSD:await dep('contracts/test/Fixtures.sol:FixtureToken'),usdc:await dep('contracts/test/Fixtures.sol:DecimalsToken',6),safe:testAuthority(4).address};
+- }else{
+-  const need=k=>{const v=process.env[k];if(!v)throw Error('missing env '+k);return v.trim();};
+-  const provider=new ethers.JsonRpcProvider(need('RPC_URL'));
+-  deployer=new ethers.Wallet(need('DEPLOYER_PRIVATE_KEY'),provider);
+-  revealSigner=new ethers.Wallet(readFileSync(need('SIGNER_KEY_FILE'),'utf8').trim());
+-  revealCommit=need('REVEAL_COMMIT');
+-  console.log(JSON.stringify(await preflight(provider,await deployer.getAddress(),revealSigner.address),null,1));
+-  if(process.env.PREFLIGHT_ONLY==='1')process.exit(0);
+- }
++ const dry=process.argv.includes('--dry-run'),resuming=process.argv.includes('--resume');
++ const dir=process.env.DEPLOYMENTS_DIR??fileURLToPath(new URL('../deployments/',import.meta.url));
++ const writeAtomic=(file,text)=>{mkdirSync(dir,{recursive:true});writeFileSync(file+'.tmp',text);renameSync(file+'.tmp',file);};
++ let lastStep='none',partialFile=null,close=()=>{};
+  try{
+-  const d=await deployMainnet({deployer,revealSigner,revealCommit,cfg,log:(n,h)=>console.log('  ',n,h)});
+-  const file=fileURLToPath(new URL(`../deployments/${dry?'dryrun-':''}${d.chainId}-${Date.now()}.json`,import.meta.url));
+-  mkdirSync(resolve(file,'..'),{recursive:true});
+-  writeFileSync(file,JSON.stringify({...d,followUp:{goldBookRegistry:mainnetGoldBookEntry(d),
+-   workerVars:{CHAIN_ID:String(d.chainId),CONTRACT_ADDRESS:d.contract,METADATA_BASE:d.metadataBase,PAYMENT_TOKENS:d.paymentTokens.map(t=>t.token).join(',')}}},null,1));
+-  console.log(JSON.stringify({contract:d.contract,owner:d.owner,pendingOwner:d.pendingOwner,paymentTokens:d.paymentTokens,readBackMismatch:d.readBackMismatch,totalGas:d.totalGas,file},null,1));
+-  if(d.readBackMismatch.length)process.exitCode=2;
+- }finally{close();}
++  let deployer,revealSigner,revealCommit,cfg=MAINNET,resume=null;
++  if(dry){
++   const rpc=await createTestProvider(1),provider=new ethers.BrowserProvider(rpc,undefined,{cacheTimeout:-1});
++   deployer=await provider.getSigner(0);close=()=>rpc.disconnect();revealSigner=testAuthority(1);
++   revealCommit=revealChain(ethers.keccak256(ethers.toUtf8Bytes('ember-evo-genesis MAINNET DRY RUN reveal chain'))).anchor;
++   // local fixtures (the Sepolia test tokens refuse chainId 1): 18 decimals for imdUSD, 6 for USDC
++   const dep=async(k,...a)=>{const c=await new ethers.ContractFactory(artifacts[k].abi,artifacts[k].bytecode,deployer).deploy(await deployer.getAddress(),...a);await c.waitForDeployment();return c.getAddress();};
++   cfg={...MAINNET,imdUSD:await dep('contracts/test/Fixtures.sol:FixtureToken'),usdc:await dep('contracts/test/Fixtures.sol:DecimalsToken',6),safe:testAuthority(4).address};
++  }else{
++   const need=k=>{const v=process.env[k];if(!v)throw Error('missing env '+k);return v.trim();};
++   partialFile=runGuard(dir,resuming);
++   if(partialFile)resume=JSON.parse(readFileSync(partialFile,'utf8'));
++   const provider=mainnetProvider(need('RPC_URL'));
++   deployer=new ethers.Wallet(need('DEPLOYER_PRIVATE_KEY'),provider);
++   revealSigner=new ethers.Wallet(readFileSync(need('SIGNER_KEY_FILE'),'utf8').trim());
++   revealCommit=need('REVEAL_COMMIT');
++   console.log(JSON.stringify(await preflight(provider,await deployer.getAddress(),revealSigner.address,MAINNET,localBuild(),resume,{allowUsedDeployer:process.env.ALLOW_USED_DEPLOYER==='1'}),null,1));
++  }
++  if(dry||process.env.PREFLIGHT_ONLY!=='1'){
++   partialFile??=dry?null:join(dir,`partial-1-${Date.now()}.json`);
++   const d=await deployMainnet({deployer,revealSigner,revealCommit,cfg,resume,timing:dry?{pollMs:10}:undefined,log:(n,h)=>{lastStep=n;console.log('  ',n,h);},
++    checkpoint:partialFile?s=>writeAtomic(partialFile,JSON.stringify(s,null,1)):()=>{}});
++   const file=join(dir,`${dry?'dryrun-':''}${d.chainId}-${Date.now()}.json`);
++   writeAtomic(file,JSON.stringify({...d,followUp:{goldBookRegistry:mainnetGoldBookEntry(d),
++    workerVars:{CHAIN_ID:String(d.chainId),CONTRACT_ADDRESS:d.contract,METADATA_BASE:d.metadataBase,PAYMENT_TOKENS:d.paymentTokens.map(t=>t.token).join(',')}}},null,1));
++   if(partialFile&&!d.readBackMismatch.length)rmSync(partialFile,{force:true});   // a mismatch stays open: a resume reads it back again
++   console.log(JSON.stringify({contract:d.contract,owner:d.owner,pendingOwner:d.pendingOwner,paymentTokens:d.paymentTokens,readBackMismatch:d.readBackMismatch,totalGas:d.totalGas,file},null,1));
++   if(d.readBackMismatch.length)process.exitCode=2;
++  }
++ }catch(e){reportFailure(e,{lastStep,partialRecord:partialFile});}
++ finally{await close();}
+ }
+
+--- Submission10/tools/safe-batch.mjs
++++ Submission11/tools/safe-batch.mjs
+@@ -1,53 +1,190 @@
+ // Safe Transaction Builder files for the owner steps after the mainnet deployment (deploy-mainnet.mjs leaves the Safe as
+ // pendingOwner and minting paused). Load the file in app.safe.global -> Apps -> Transaction Builder -> drag & drop, check
+-// the decoded calls, then two owners sign and one executes. Nothing here signs or sends.
++// the decoded calls (the app does not check a file's chain: have the Safe open on Ethereum), then two owners sign and one
++// executes. Nothing here signs or sends; every mode reads the chain first
++// (READ_RPC_URL, default a public mainnet RPC).
++//   node contract/tools/safe-batch.mjs status <deployment record>
++//       Prints who owns the contract and whether it is opened. Until owner is the Safe, the deployer key still has every owner power.
+ //   node contract/tools/safe-batch.mjs accept <deployment record>
+ //       acceptOwnership(): the Safe becomes the owner (do this right after the deployment).
+-//   node contract/tools/safe-batch.mjs open <deployment record> <snapshot wallets json> <snapshot time> <opening time>
+-//       configureSnapshot(root, count, takenAt, start) + setMintPaused(false), as one batch. Times are unix seconds or
+-//       ISO dates with a zone (2026-11-20T20:00:00+08:00). Free and paid minting both start at the opening time; the
+-//       snapshot can be set only once, so the wallet list is final when this batch executes.
++//   node contract/tools/safe-batch.mjs open <deployment record> <snapshot wallets json> <snapshot time> <opening time> --sample-look=<lookKey>/<skin> [--far-opening]
++//       setRevealURIs(locked) + configureSnapshot(root, count, takenAt, start) + setMintPaused(false), as one batch. Times are
++//       unix seconds or ISO dates with a zone (2026-11-20T20:00:00+08:00). Free and paid minting both start at the opening
++//       time; the URIs lock here and the snapshot can be set only once, so the host must be live, the opening time right and the
++//       wallet list final when this batch executes. --sample-look names a look the metadata host already serves: the base URI
++//       plus it must answer with JSON before the URIs lock. An opening more than 60 days ahead needs --far-opening.
+ import {readFileSync,writeFileSync} from 'node:fs';
+ import {fileURLToPath} from 'node:url';
+ import {resolve} from 'node:path';
++import {createInterface} from 'node:readline/promises';
+ import {ethers} from './runtime.mjs';
++import {reportFailure} from './tool-errors.mjs';
+ import {snapshotTree} from '../../signer/free-approval.mjs';
+ 
+-const I=new ethers.Interface(['function acceptOwnership()','function configureSnapshot(bytes32 root,uint256 eligible,uint256 takenAt,uint256 start)','function setMintPaused(bool paused)']);
+-const unix=v=>{if(/^\d{9,11}$/.test(String(v)))return Number(v);if(!/(Z|[+-]\d\d:\d\d)$/.test(String(v)))throw Error('give a unix time or an ISO date with a zone: '+v);
++const I=new ethers.Interface(['function acceptOwnership()','function setRevealURIs(string pending,string base,bool lock)',
++ 'function configureSnapshot(bytes32 root,uint256 eligible,uint256 takenAt,uint256 start)','function setMintPaused(bool paused)']);
++const READ=['function owner() view returns (address)','function pendingOwner() view returns (address)','function snapshotConfigured() view returns (bool)',
++ 'function mintPaused() view returns (bool)','function revealURIsLocked() view returns (bool)','function pendingURI() view returns (string)','function revealBaseURI() view returns (string)',
++ 'function revealCommit() view returns (bytes32)','function appearanceSigner() view returns (address)','function pendingAppearanceSigner() view returns (address)','function maxSupply() view returns (uint256)',
++ 'function skinCap(uint256) view returns (uint256)','function paidPriceApproved() view returns (bool)',
++ 'event PaymentTokenAdded(address indexed token,uint256 amount,uint256 goldCost,uint256 usableAt)'];
++const SKIN_CAPS='1068,218,218,68,68,48';
++const DAY=86400;
++export const MAX_OPENING_AHEAD=60*DAY;
++const WORKER_LIST=fileURLToPath(new URL('../../signer/snapshot-wallets.json',import.meta.url));
++const PUBLIC_RPC='https://ethereum-rpc.publicnode.com';
++// 10 digits are unix seconds until the year 2286: an extra digit is a typo (Swarm audit 90ae2f92 finding 3)
++export const unix=v=>{if(/^\d{10}$/.test(String(v)))return Number(v);if(!/(Z|[+-]\d\d:\d\d)$/.test(String(v)))throw Error('give a unix time or an ISO date with a zone: '+v);
+  const t=Date.parse(v);if(!Number.isFinite(t))throw Error('bad date '+v);return Math.floor(t/1000);};
+ 
++// apps/tx-builder/src/lib/checksum.ts of safe-global/safe-react-apps: keys sorted, meta.name nulled, keccak256 of the string
++const serialize=json=>{
++ if(Array.isArray(json))return `[${json.map(serialize).join(',')}]`;
++ if(typeof json==='object'&&json!==null){const keys=Object.keys(json).sort();return `{${JSON.stringify(keys)}${keys.map(k=>serialize(json[k])+',').join('')}}`;}
++ return JSON.stringify(json===undefined?null:json);
++};
++export const batchChecksum=file=>ethers.keccak256(ethers.toUtf8Bytes(serialize({...file,meta:{...file.meta,name:null}})));
++
++// The app shows decoded calls only when data is empty and contractMethod is set (Swarm audit 90ae2f92 finding 9)
++function builderTx(to,fn,args){
++ const f=I.getFunction(fn);
++ return {to,value:'0',data:null,contractMethod:{inputs:f.inputs.map(p=>({internalType:p.type,name:p.name,type:p.type})),name:f.name,payable:false},
++  contractInputsValues:Object.fromEntries(f.inputs.map((p,i)=>[p.name,String(args[i])]))};
++}
++/** The calldata the app encodes from a builder transaction. */
++export const calldataOf=t=>I.encodeFunctionData(t.contractMethod.name,t.contractMethod.inputs.map(p=>{const v=t.contractInputsValues[p.name];return p.type==='bool'?v==='true':v;}));
+ export function builderFile(d,name,description,calls){
+- return {version:'1.0',chainId:String(d.chainId),createdAt:Date.now(),
++ const file={version:'1.0',chainId:String(d.chainId),createdAt:Date.now(),
+   meta:{name,description,txBuilderVersion:'1.16.5',createdFromSafeAddress:d.safe,createdFromOwnerAddress:''},
+-  transactions:calls.map(([fn,args])=>({to:d.contract,value:'0',data:I.encodeFunctionData(fn,args),contractMethod:null,contractInputsValues:null}))};
++  transactions:calls.map(([fn,args])=>builderTx(d.contract,fn,args))};
++ return {...file,meta:{...file.meta,checksum:batchChecksum(file)}};
+ }
+ export function acceptBatch(d){return builderFile(d,'EmberEvoGenesis: accept ownership','acceptOwnership() on '+d.contract,[['acceptOwnership',[]]]);}
+-export function openBatch(d,wallets,takenAt,start,now=Math.floor(Date.now()/1000)){
++export function openBatch(d,wallets,takenAt,start,now=Math.floor(Date.now()/1000),{farOpening=false,lockUris=true}={}){
+  const tree=snapshotTree(wallets);
+  if(tree.count>Number(d.maxSupply))throw Error('SNAPSHOT_CAPACITY');
+  if(!(takenAt>0&&takenAt<=now))throw Error('the snapshot time must be in the past');
+  // the Safe needs time to collect two signatures; the contract refuses a start already passed when the batch executes
+  if(!(start>=now+6*3600&&start>=takenAt))throw Error('the opening time must be at least 6 hours from now');
++ // freeStartAt has no setter and the snapshot is once only: a wrong year would leave the collection unmintable for good
++ if(!farOpening&&(start>now+MAX_OPENING_AHEAD||takenAt<now-MAX_OPENING_AHEAD))throw Error('a time more than 60 days from now: check it, or pass --far-opening');
++ if(lockUris&&(!d.pendingURI||!d.metadataBase))throw Error('the record has no metadata URIs');
+  const usdc=d.paymentTokens?.[1]?.usableAt;
+  const warnings=usdc&&start<usdc?['USDC is usable only from '+new Date(usdc*1000).toISOString()+': before that only imdUSD works']:[];
++ const calls=[['configureSnapshot',[tree.root,tree.count,takenAt,start]],['setMintPaused',[false]]];
++ if(lockUris)calls.unshift(['setRevealURIs',[d.pendingURI,d.metadataBase,true]]);
+  return {tree,warnings,file:builderFile(d,'EmberEvoGenesis: free list + open',
+-  `configureSnapshot(${tree.root}, ${tree.count}, ${takenAt}, ${start}) + setMintPaused(false). Opening ${new Date(start*1000).toISOString()}`,
+-  [['configureSnapshot',[tree.root,tree.count,takenAt,start]],['setMintPaused',[false]]])};
++  `${lockUris?`setRevealURIs(${d.pendingURI}, ${d.metadataBase}, locked) + `:''}configureSnapshot(${tree.root}, ${tree.count}, ${takenAt}, ${start}) + setMintPaused(false). Opening ${new Date(start*1000).toISOString()}`,
++  calls)};
++}
++
++// a public RPC may answer one read from a node that has not seen the contract yet: that read is asked again, not the whole state
++const steady=async read=>{let last;for(let i=0;i<5;i++){try{return await read();}catch(e){last=e;await new Promise(r=>setTimeout(r,1000));}}throw last;};
++/** What the chain says now; the batch files are built from the record, which cannot see what the deployer key did since (finding 6). */
++export async function chainState(provider,d){
++ const g=new ethers.Contract(d.contract,READ,provider),q=(fn,...a)=>steady(()=>g[fn](...a));
++ const chainId=await provider.send('eth_chainId',[]);
++ if(BigInt(chainId)!==BigInt(d.chainId))throw Error('the read RPC is on another chain');
++ const [owner,pendingOwner,snapshotConfigured,mintPaused,revealURIsLocked,pendingURI,revealBaseURI]=await Promise.all(['owner','pendingOwner','snapshotConfigured','mintPaused','revealURIsLocked','pendingURI','revealBaseURI'].map(fn=>q(fn)));
++ const [revealCommit,signer,pendingSigner,maxSupply,paidPriceApproved,...caps]=await Promise.all([...['revealCommit','appearanceSigner','pendingAppearanceSigner','maxSupply','paidPriceApproved'].map(fn=>q(fn)),...[0,1,2,3,4,5].map(i=>q('skinCap',i))]);
++ // the count is private on chain, so the events tell it; an RPC may refuse the range, which must not hide that it went unchecked
++ const extraTokens=await g.queryFilter('PaymentTokenAdded',d.startBlock??0).then(l=>String(l.length)).catch(()=>null);
++ if(extraTokens===null)console.warn('could not read the PaymentTokenAdded logs: check on Etherscan that only USDC was added');
++ return {owner:ethers.getAddress(owner),pendingOwner:ethers.getAddress(pendingOwner),snapshotConfigured,mintPaused,revealURIsLocked,pendingURI,revealBaseURI,
++  revealCommit,signer:ethers.getAddress(signer),pendingSigner:ethers.getAddress(pendingSigner),maxSupply:maxSupply.toString(),extraTokens,paidPriceApproved,skinCaps:caps.join(',')};
++}
++/** What the deployer key could still change after the record was written. */
++export function checkRecord(s,d){
++ const bad=[];
++ if(s.revealCommit.toLowerCase()!==d.revealCommit.toLowerCase())bad.push('revealCommit');
++ if(s.signer!==ethers.getAddress(d.signer))bad.push('signer');
++ if(s.pendingSigner!==ethers.ZeroAddress)bad.push('pendingSigner');
++ if(s.maxSupply!==String(d.maxSupply))bad.push('maxSupply');
++ if(s.skinCaps!==SKIN_CAPS)bad.push('skinCaps');
++ if(s.extraTokens!==null&&s.extraTokens!=='1')bad.push('extraTokens');
++ if(!s.paidPriceApproved)bad.push('paidPriceApproved');
++ if(bad.length)throw Error('CHAIN_DIFFERS_FROM_RECORD '+bad.join(',')+': the deployer key changed the contract, stop and check');
++}
++export function checkAccept(s,d){
++ const safe=ethers.getAddress(d.safe);
++ if(s.owner===safe)throw Error('ALREADY_ACCEPTED the Safe is already the owner');
++ if(s.pendingOwner!==safe)throw Error('NOT_PENDING_SAFE pendingOwner is '+s.pendingOwner+', not the Safe: the deployer key changed it, stop and check');
++ if(s.snapshotConfigured||!s.mintPaused||s.pendingURI!==d.pendingURI||s.revealBaseURI!==d.metadataBase)throw Error('CHAIN_DIFFERS_FROM_RECORD free list, pause or metadata URIs: the deployer key changed the contract, stop and check');
++ checkRecord(s,d);
++}
++/** Returns whether the batch must lock the URIs. */
++export function checkOpen(s,d){
++ const safe=ethers.getAddress(d.safe);
++ if(s.owner!==safe)throw Error('NOT_OWNER the owner is '+s.owner+', not the Safe: the Safe must accept first');
++ if(s.snapshotConfigured)throw Error('SNAPSHOT_ALREADY_SET the free list was set outside this tool: stop and check');
++ if(!s.mintPaused)throw Error('ALREADY_OPEN minting is not paused');
++ if(s.pendingURI!==d.pendingURI||s.revealBaseURI!==d.metadataBase)throw Error('URIS_CHANGED the chain holds other metadata URIs than the record: stop and check');
++ checkRecord(s,d);
++ return !s.revealURIsLocked;
++}
++/** The Worker bundles this list: a different root fails every free approval after the opening (finding 7). */
++export function checkWorkerList(tree,file=WORKER_LIST){
++ const root=snapshotTree(JSON.parse(readFileSync(file,'utf8'))).root;
++ if(root!==tree.root)throw Error(`WORKER_LIST_DIFFERS signer/snapshot-wallets.json has root ${root}, this batch ${tree.root}: copy the list written next to the record there, deploy the signer Worker, run this again`);
++}
++/** The URI locks for good in this batch: the host must already answer with JSON. */
++export async function checkPendingServed(uri,fetchImpl=fetch){
++ let r;try{r=await fetchImpl(uri);}catch{throw Error('PENDING_URI_NOT_SERVED '+uri);}
++ if(!r.ok)throw Error('PENDING_URI_NOT_SERVED '+uri+' answered '+r.status);
++ try{await r.json();}catch{throw Error('PENDING_URI_NOT_JSON '+uri);}
++}
++/** A token's URI is the base plus lookKey/skin: one the host should already serve must answer before the base locks (Swarm audit 90ae2f92 finding 5). */
++export async function checkSampleServed(base,sample,fetchImpl=fetch){
++ if(!/^[^\s/?#]+\/\d+$/.test(sample??''))throw Error('SAMPLE_LOOK_REQUIRED the URIs lock in this batch: pass --sample-look=<lookKey>/<skin> of a look the metadata host already serves');
++ const uri=base+sample;let r;try{r=await fetchImpl(uri);}catch{throw Error('SAMPLE_LOOK_NOT_SERVED '+uri);}
++ if(!r.ok)throw Error('SAMPLE_LOOK_NOT_SERVED '+uri+' answered '+r.status);
++ try{await r.json();}catch{throw Error('SAMPLE_LOOK_NOT_JSON '+uri);}
++}
++/** A listed address with contract code (other than an EIP-7702 wallet) holds a free slot nobody can use. */
++export async function contractWallets(provider,wallets){
++ const found=[];
++ for(let i=0;i<wallets.length;i+=20)await Promise.all(wallets.slice(i,i+20).map(async w=>{const c=await steady(()=>provider.getCode(w));if(c!=='0x'&&!c.startsWith('0xef0100'))found.push(w);}));
++ return found.sort();
+ }
+ 
+ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+- const [mode,recordFile,...rest]=process.argv.slice(2);
+- const d=JSON.parse(readFileSync(resolve(recordFile),'utf8'));
+- if(!d.safe||!ethers.isAddress(d.contract))throw Error('not a mainnet deployment record');
+- const base=resolve(recordFile).replace(/\.json$/,'');
+- if(mode==='accept'){writeFileSync(base+'.safe-accept.json',JSON.stringify(acceptBatch(d),null,1));console.log('wrote',base+'.safe-accept.json');}
+- else if(mode==='open'){
+-  const [walletsFile,taken,start]=rest;const wallets=JSON.parse(readFileSync(resolve(walletsFile),'utf8'));
+-  const o=openBatch(d,wallets,unix(taken),unix(start));
+-  writeFileSync(base+'.safe-open.json',JSON.stringify(o.file,null,1));
+-  // the signer Worker serves free approvals from the same list (same order of dedupe + sort as the root above)
+-  writeFileSync(base+'.snapshot-wallets.json',JSON.stringify([...new Set(wallets.map(w=>ethers.getAddress(w).toLowerCase()))].sort(),null,1));
+-  console.log(JSON.stringify({root:o.tree.root,eligible:o.tree.count,listed:wallets.length,warnings:o.warnings,file:base+'.safe-open.json'},null,1));
+- }else throw Error('usage: safe-batch.mjs accept <record> | open <record> <wallets.json> <snapshot time> <opening time>');
++ try{
++  const all=process.argv.slice(2),farOpening=all.includes('--far-opening'),sample=all.find(a=>a.startsWith('--sample-look='))?.slice(14),[mode,recordFile,...rest]=all.filter(a=>!a.startsWith('--'));
++  const d=JSON.parse(readFileSync(resolve(recordFile),'utf8'));
++  if(!d.safe||!ethers.isAddress(d.contract))throw Error('not a mainnet deployment record');
++  const base=resolve(recordFile).replace(/\.json$/,'');
++  if(d.chainId!==1&&!process.env.READ_RPC_URL)throw Error('this record is not on mainnet: set READ_RPC_URL');
++  if(mode!=='status'&&d.readBackMismatch?.length)throw Error('RECORD_HAS_MISMATCH '+d.readBackMismatch.join(',')+': this deployment read back wrong values, no Safe file until it is checked');
++  const provider=new ethers.JsonRpcProvider(process.env.READ_RPC_URL?.trim()||PUBLIC_RPC,d.chainId,{staticNetwork:true});
++  // a public RPC may answer from a node that has not seen the last block: a refusal must hold for a while before it counts
++  const holds=async check=>{let last;for(let i=0;i<10;i++){try{return check(await chainState(provider,d));}catch(e){last=e;await new Promise(r=>setTimeout(r,3000));}}throw last;};
++  if(mode==='status'){
++   const s=await holds(x=>x);
++   console.log(JSON.stringify({...s,ownerIsSafe:s.owner===ethers.getAddress(d.safe),next:s.owner===ethers.getAddress(d.safe)?'done: the deployer key has no owner power left':'the Safe must sign acceptOwnership: until then the deployer key has every owner power'},null,1));
++  }else if(mode==='accept'){
++   await holds(s=>checkAccept(s,d));
++   writeFileSync(base+'.safe-accept.json',JSON.stringify(acceptBatch(d),null,1));console.log('wrote',base+'.safe-accept.json');
++  }else if(mode==='open'){
++   const [walletsFile,taken,start]=rest;const wallets=JSON.parse(readFileSync(resolve(walletsFile),'utf8'));
++   const lockUris=await holds(s=>checkOpen(s,d));
++   const takenAt=unix(taken),startAt=unix(start),o=openBatch(d,wallets,takenAt,startAt,undefined,{farOpening,lockUris});
++   // the signer Worker serves free approvals from the same list (same order of dedupe + sort as the root above)
++   const list=[...new Set(wallets.map(w=>ethers.getAddress(w).toLowerCase()))].sort();
++   // named by its root, so a later run cannot leave a list and a batch that disagree
++   const listFile=`${base}.snapshot-wallets-${o.tree.root.slice(2,10)}.json`;
++   writeFileSync(listFile,JSON.stringify(list,null,1));console.log('wrote',listFile);
++   checkWorkerList(o.tree);
++   if(lockUris){await checkPendingServed(d.pendingURI);await checkSampleServed(d.metadataBase,sample);}
++   const withCode=await contractWallets(provider,list);
++   if(withCode.length)o.warnings.push('listed addresses with contract code hold a free slot nobody can use: '+withCode.join(', '));
++   // the last sanity check before a once-only call: the owner reads the date and types it
++   const iso=new Date(startAt*1000).toISOString().slice(0,16);
++   console.log(JSON.stringify({root:o.tree.root,eligible:o.tree.count,listed:wallets.length,warnings:o.warnings,snapshotTaken:new Date(takenAt*1000).toISOString(),openingUTC:iso},null,1));
++   const rl=createInterface({input:process.stdin,output:process.stdout});
++   const confirm=`${iso} ${o.tree.count}`;
++   const typed=(await rl.question(`Minting opens at ${iso} UTC with ${o.tree.count} wallets on the free list, and neither can ever change. Type "${confirm}" to write the batch: `)).trim();rl.close();
++   if(typed!==confirm)throw Error('the date and count do not match: nothing was written');
++   writeFileSync(base+'.safe-open.json',JSON.stringify(o.file,null,1));console.log('wrote',base+'.safe-open.json');
++  }else throw Error('usage: safe-batch.mjs status <record> | accept <record> | open <record> <wallets.json> <snapshot time> <opening time> --sample-look=<lookKey>/<skin> [--far-opening]');
++ }catch(e){reportFailure(e);}
+ }
+
+--- Submission10/offchain/signer/free-approval.mjs
++++ Submission11/offchain/signer/free-approval.mjs
+@@ -13,6 +13,7 @@ export const READ_ABI=['function appearanceSigner() view returns (address)','fun
+  'function freeMinted() view returns (uint256)','function eligibleWalletCount() view returns (uint256)','function freeStartAt() view returns (uint256)',
+  'function skinCount(uint256) view returns (uint256)','function skinCap(uint256) view returns (uint256)','function currentEpoch() view returns (uint256)',
+  'function epochRandomCount(uint256) view returns (uint256)','function MAX_RANDOM_PER_EPOCH() view returns (uint256)'];
++export const METADATA_BASE_RE=/^(ipfs|ar|https):\/\/[^\s]{1,200}\/$/;
+ const coder=AbiCoder.defaultAbiCoder();
+ 
+ export class ApprovalError extends Error{constructor(code,status=409){super(code);this.code=code;this.status=status;}}
+@@ -50,7 +51,7 @@ export class FreeApprovalSigner{
+   *  (or tree: a prebuilt snapshotTree, so a Worker can build it once and still make a new provider per request). */
+  constructor({provider,contractAddress,chainId,signer,metadataBase,snapshotWallets,tree=null,ttlSeconds=300}){
+   if(!Number.isSafeInteger(chainId)||chainId<1)fail('CONFIG_CHAIN_ID',500);
+-  if(typeof metadataBase!=='string'||!/^(ipfs|ar|https):\/\/[^\s]{1,200}\/$/.test(metadataBase))fail('CONFIG_METADATA_BASE',500);
++  if(typeof metadataBase!=='string'||!METADATA_BASE_RE.test(metadataBase))fail('CONFIG_METADATA_BASE',500);
+   if(!Number.isSafeInteger(ttlSeconds)||ttlSeconds<60||ttlSeconds>900)fail('CONFIG_TTL',500);
+   // the operator's address, not the buyer's: a configuration error (Swarm audit d1c83d3d finding 2)
+   try{this.contractAddress=wallet(contractAddress);}catch{fail('CONFIG_CONTRACT_ADDRESS',500);}
+
+--- Submission10/offchain/signer/paid-approval.mjs
++++ Submission11/offchain/signer/paid-approval.mjs
+@@ -31,7 +31,7 @@ export const PAID_TYPES={PaidAuthorization:[{name:'orderId',type:'bytes32'},{nam
+ export const GOLD_CONSENT_TYPES={GenesisGoldHold:[{name:'orderId',type:'bytes32'},{name:'wallet',type:'address'},{name:'goldCost',type:'uint256'},
+  {name:'genesis',type:'address'},{name:'token',type:'address'},{name:'lookKey',type:'bytes32'},{name:'choice',type:'uint8'},{name:'uriHash',type:'bytes32'},
+  {name:'embeoCost',type:'uint256'},{name:'deadline',type:'uint256'},{name:'signerEpoch',type:'uint256'}]};
+-export const PAID_READ_ABI=['function appearanceSigner() view returns (address)','function signerEpoch() view returns (uint256)',
++export const PAID_READ_ABI=['function snapshotRoot() view returns (bytes32)','function appearanceSigner() view returns (address)','function signerEpoch() view returns (uint256)',
+  'function mintPaused() view returns (bool)','function snapshotConfigured() view returns (bool)','function paidPriceApproved() view returns (bool)',
+  'function paidAvailability() view returns (uint256)','function paidCost() view returns (uint256)',
+  'function freeStartAt() view returns (uint256)','function totalMinted() view returns (uint256)','function maxSupply() view returns (uint256)',
+@@ -55,8 +55,10 @@ function wallet(v){if(typeof v!=='string'||!/^0x[0-9a-fA-F]{40}$/.test(v))fail('
+ export class PaidApprovalSigner{
+  /** gold: the GenesisGold binding ({reserve,order,reconcile}); deploymentId: this deployment's id in the book's registry.
+   *  ticketSecret: random secret of this Worker (HMAC for prepared orders). ttlSeconds: at most the book's 900 s.
+-  *  allowedTokens (optional): the payment tokens this signer issues orders for; default every token usable on chain. */
+- constructor({provider,contractAddress,chainId,signer,metadataBase,gold,deploymentId,ticketSecret,ttlSeconds=600,randomBytes,allowedTokens}){
++  *  allowedTokens (optional): the payment tokens this signer issues orders for; default every token usable on chain.
++  *  snapshotRoot (optional): root of the free list this Worker bundles; orders stop when the chain holds another one, so paid
++  *  mints do not keep selling the shared supply while free approvals fail SNAPSHOT_MISMATCH (Swarm audit 90ae2f92 finding 7). */
++ constructor({provider,contractAddress,chainId,signer,metadataBase,gold,deploymentId,ticketSecret,ttlSeconds=600,randomBytes,allowedTokens,snapshotRoot}){
+   if(!Number.isSafeInteger(chainId)||chainId<1)fail('CONFIG_CHAIN_ID',500);
+   if(typeof metadataBase!=='string'||!/^(ipfs|ar|https):\/\/[^\s]{1,200}\/$/.test(metadataBase))fail('CONFIG_METADATA_BASE',500);
+   if(!Number.isSafeInteger(ttlSeconds)||ttlSeconds<120||ttlSeconds>900)fail('CONFIG_TTL',500);
+@@ -65,7 +67,7 @@ export class PaidApprovalSigner{
+   if(allowedTokens!==undefined&&(!Array.isArray(allowedTokens)||!allowedTokens.length))fail('CONFIG_PAYMENT_TOKENS',500);
+   this.allowedTokens=allowedTokens?.map(t=>{try{return wallet(t).toLowerCase();}catch{fail('CONFIG_PAYMENT_TOKENS',500);}})??null;
+   try{this.contractAddress=wallet(contractAddress);}catch{fail('CONFIG_CONTRACT_ADDRESS',500);}
+-  this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;
++  this.chainId=chainId;this.signer=signer;this.metadataBase=metadataBase;this.ttl=ttlSeconds;this.snapshotRoot=snapshotRoot??null;
+   this.gold=gold;this.deploymentId=deploymentId;this.provider=provider;this.contract=new Contract(this.contractAddress,PAID_READ_ABI,provider);
+   this.randomBytes=randomBytes??(n=>crypto.getRandomValues(new Uint8Array(n)));
+   this.domain={name:DOMAIN_NAME,version:DOMAIN_VERSION,chainId,verifyingContract:this.contractAddress};
+@@ -91,6 +93,7 @@ export class PaidApprovalSigner{
+    c.freeStartAt(),c.totalMinted(),c.maxSupply(),c.paymentRecipient(),this.provider.getBlock('latest')]);
+   if(getAddress(signerOnChain)!==getAddress(this.signer.address))fail('SIGNER_NOT_ACTIVE',503);
+   if(!configured)fail('MINT_NOT_READY',503);
++  if(this.snapshotRoot&&await c.snapshotRoot()!==this.snapshotRoot)fail('SNAPSHOT_MISMATCH',503);
+   if(paused)fail('MINT_PAUSED',503);
+   if(!priceApproved||available===0n)fail('PAID_NOT_AVAILABLE');
+   if(BigInt(block.timestamp)<startAt)fail('SALE_NOT_STARTED');
+
+--- Submission10/offchain/signer/worker-entry.mjs
++++ Submission11/offchain/signer/worker-entry.mjs
+@@ -27,8 +27,8 @@ function approver(env){
+ }
+ function paidApprover(env){
+  if(!env.GOLD||!env.GOLD_DEPLOYMENT_ID||!env.TICKET_SECRET)return null;
+- key??=new Wallet(secret(env.SIGNER_PRIVATE_KEY));
+- return new PaidApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:contractAddress(env),signer:key,metadataBase:env.METADATA_BASE,
++ tree??=snapshotTree(snapshotWallets);key??=new Wallet(secret(env.SIGNER_PRIVATE_KEY));
++ return new PaidApprovalSigner({provider:provider(env),chainId:Number(env.CHAIN_ID),contractAddress:contractAddress(env),signer:key,metadataBase:env.METADATA_BASE,snapshotRoot:tree.root,
+   gold:env.GOLD,deploymentId:env.GOLD_DEPLOYMENT_ID,ticketSecret:secret(env.TICKET_SECRET),ttlSeconds:Number(env.PAID_TTL_SECONDS??600),
+   // PAYMENT_TOKENS (optional, comma-separated): the tokens this signer issues orders for (Genesis audit 944905c3). Set
+   // but empty is a configuration error, never "every token" (Swarm audit d1c83d3d finding 1).

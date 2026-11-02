@@ -1,0 +1,13 @@
+--- Submission10/contracts/EmberEvoGenesisCandidate.sol
++++ Submission11/contracts/EmberEvoGenesisCandidate.sol
+@@ -14,8 +14,8 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+ 
+-/// @notice R6 testnet rehearsal build. Deployable on test networks; mainnet is refused until the final review removes
+-///         that guard. Snapshot, catalogue, price and administration still need final review.
++/// @notice Ember Evo Genesis collection, deployable on Ethereum mainnet and test networks with the same behaviour. Minting
++///         stays paused until the owner has set the free-list snapshot, the locked reveal URIs and the reveal commitment.
+ /// @dev R6 over R5 (owner decisions 2026-10-22): looks may repeat (no look uniqueness at all); supply 1,688 with skin caps
+ ///      1,068 / 218 / 218 / 68 / 68 / 48 (owner 2026-10-28), which the owner may reset with configureSupply until minting opens, after which
+ ///      they are fixed for good. Unchanged from R5: six skins, four mint choices (green / ice / purple chosen at mint,
