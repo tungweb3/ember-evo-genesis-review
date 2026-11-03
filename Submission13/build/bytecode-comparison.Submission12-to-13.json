@@ -1,0 +1,19 @@
+{
+ "compared": "Submission12/build/standard-input.json and Submission13/build/standard-input.json, both compiled with the same solc payload",
+ "runtimeBytes": {
+  "submission12": 24427,
+  "submission13": 24427
+ },
+ "runtimeIdentical": true,
+ "runtimeIdenticalWithoutCborMetadata": true,
+ "abiIdentical": true,
+ "initcodeBytes": {
+  "submission12": 27489,
+  "submission13": 27489
+ },
+ "initcodeDifferenceWithoutCborMetadata": {
+  "fromByte": 27436,
+  "submission12SpanBytes": 0,
+  "submission13SpanBytes": 0
+ }
+}
