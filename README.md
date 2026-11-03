@@ -2,13 +2,13 @@
 
 Ember Evo Genesis is an **unofficial, community-made** NFT collection (1,688 3D "Pepe" characters).
 
-**Current: [Submission11](Submission11/AUDIT_README.md): remediation of audit 90ae2f92 on the build intended for Ethereum
-mainnet and on its deployment tools, submitted for review before the deployment (2026-11-03).** The contract changes only in one
-`@notice` comment; the runtime is identical to Submission10 once the trailing metadata is removed. The tools changed a lot:
-`tools/deploy-mainnet.ps1`, `tools/deploy-mainnet.mjs`, `tools/safe-batch.mjs` and the new `tools/tool-errors.mjs`. Not deployed on
-any chain; `Submission11/build/standard-input.json` reproduces it (solc 0.8.38, runtime 24,427 bytes). The differences are in
-[Submission11/build/](Submission11/build/).
+**Current: [Submission12](Submission12/AUDIT_README.md): remediation of audit 358f7f40 on the deployment tools for Ethereum
+mainnet, submitted for review before the deployment (2026-11-03).** The contract is the build of Submission11, byte for byte. The tools
+`tools/deploy-mainnet.ps1`, `tools/deploy-mainnet.mjs` and `tools/safe-batch.mjs` and the signer's `offchain/signer/paid-approval.mjs`
+changed. Not deployed on any chain; `Submission12/build/standard-input.json` reproduces it (solc 0.8.38, runtime 24,427 bytes). The
+differences are in [Submission12/build/](Submission12/build/).
 
+[Submission11](Submission11/AUDIT_README.md) (remediation of audit 90ae2f92 on the mainnet build and tools; audit 358f7f40 handled in Submission12),
 [Submission10](Submission10/AUDIT_README.md) (the mainnet build and first version of the tools; audit 90ae2f92 handled in Submission11),
 [Submission9](Submission9/AUDIT_README.md) (remediation of audit d1c83d3d, published for the record; Sepolia rehearsal
 `0x630CF8c1D20697d28D2a54d4e4a4612B7bEA5b30`), [Submission8](Submission8/AUDIT_README.md) (the signer applies its token policy at approve too; audit d1c83d3d handled in
