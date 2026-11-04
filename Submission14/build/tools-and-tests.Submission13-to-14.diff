@@ -1,0 +1,1020 @@
+--- Submission13/tests/contract/deploy-mainnet.test.mjs
++++ Submission14/tests/contract/deploy-mainnet.test.mjs
+@@ -28,7 +28,7 @@ async function execute(provider,file,safe){for(const t of file.transactions)awai
+ 
+ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts ownership, then the Safe sets the free list and opens',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),alice=await provider.getSigner(1),bob=await provider.getSigner(2),key=testAuthority(1);
++  const deployer=testAuthority(0).connect(provider),alice=await provider.getSigner(1),bob=await provider.getSigner(2),key=testAuthority(1);
+   const cfg=await standIns(deployer),rc=revealChain(ethers.keccak256(ethers.toUtf8Bytes('mainnet deploy test reveal chain')),64);
+   // the signer key must not be the deployer's (separate secrets)
+   await assert.rejects(deployMainnet({deployer,revealSigner:deployer,revealCommit:rc.anchor,cfg}),/SIGNER_IS_DEPLOYER/);
+@@ -79,7 +79,7 @@ test('mainnet deploy on a simulated chainId 1: deployer setup, Safe accepts owne
+ 
+ test('the mainnet tool refuses another chain',async()=>{
+  const {rpc,provider}=await chain(SEPOLIA);try{
+-  const deployer=await provider.getSigner(0);
++  const deployer=testAuthority(0).connect(provider);
+   await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:'0x'+'1'.repeat(64)}),/WRONG_CHAIN/);
+  }finally{await rpc.disconnect();}
+ });
+@@ -99,13 +99,13 @@ function laggingDeployer(deployer,share=0.3){
+  const sent=[];
+  return {sent,signer:new Proxy(deployer,{get(t,k){
+   if(k==='provider')return provider;
+-  if(k==='sendTransaction')return async tx=>{sent.push(tx);return t.sendTransaction(tx);};
++  if(k==='signTransaction')return async tx=>{sent.push(tx);return t.signTransaction(tx);};
+   const v=t[k];return typeof v==='function'?v.bind(t):v;}})};
+ }
+ 
+ test('the local build must be the reviewed one: refused before anything is sent',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),build=localBuild();
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),build=localBuild();
+   assert.doesNotThrow(()=>verifyBuild(build));
+   const receipt=JSON.parse(readFileSync(new URL('../artifacts/build-receipt.private.json',import.meta.url),'utf8')).artifacts[GENESIS];
+   assert.equal(MAINNET.reviewed.initcodeSha256,receipt.creationBytecodeSha256);assert.equal(MAINNET.reviewed.runtimeSha256,receipt.runtimeTemplateSha256);assert.equal(MAINNET.reviewed.abiSha256,receipt.abiSha256);
+@@ -134,7 +134,7 @@ test('metadata strings are checked before they are stored',()=>{
+ 
+ test('a lagging RPC: fixed consecutive nonces, the run completes and reads back clean',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),{signer,sent}=laggingDeployer(deployer);
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),{signer,sent}=laggingDeployer(deployer);
+   const start=await provider.getTransactionCount(await deployer.getAddress());
+   const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:{pollMs:1,visibleTries:200,visibleReads:2,stepTimeoutMs:2000}});
+   assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
+@@ -144,12 +144,13 @@ test('a lagging RPC: fixed consecutive nonces, the run completes and reads back
+ 
+ test('a transaction that never lands is resent at the same nonce with a higher fee and a fresh acceptance',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),calls=[];let dropped=false;
+-  const signer=new Proxy(deployer,{get(t,k){
+-   if(k==='sendTransaction')return async tx=>{calls.push(tx);
+-    if(!dropped&&calls.length===3){dropped=true;return {hash:'0x'+'ab'.repeat(32)};}   // the third step: accepted by one node, then lost
+-    return t.sendTransaction(tx);};
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),calls=[];let dropped=false;
++  const lossy=new Proxy(deployer.provider,{get(t,k){
++   if(k==='broadcastTransaction')return async raw=>{calls.push(ethers.Transaction.from(raw));
++    if(!dropped&&calls.length===3){dropped=true;return {};}   // the third step: accepted by one node, then lost
++    return t.broadcastTransaction(raw);};
+    const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  const signer=new Proxy(deployer,{get(t,k){if(k==='provider')return lossy;const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+   const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:{pollMs:1,stepTimeoutMs:5,visibleTries:40}});
+   assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
+   assert.equal(calls[2].nonce,calls[3].nonce);assert.ok(calls[3].maxFeePerGas>=calls[2].maxFeePerGas*125n/100n);
+@@ -158,10 +159,10 @@ test('a transaction that never lands is resent at the same nonce with a higher f
+ 
+ test('a run that stops halfway resumes from the chain: same contract, nothing sent twice, other keys refused',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
+   let saved=null,count=0;
+   const failing=new Proxy(deployer,{get(t,k){
+-   if(k==='sendTransaction')return async tx=>{if(++count>=4)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.sendTransaction(tx);};
++   if(k==='signTransaction')return async tx=>{if(++count>=4)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.signTransaction(tx);};
+    const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+   await assert.rejects(deployMainnet({deployer:failing,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:2,stepTimeoutMs:5,visibleTries:40}}),/rpc down/);
+   assert.equal(saved.steps.length,3);assert.ok(await provider.getCode(saved.contract)!=='0x');
+@@ -182,7 +183,7 @@ test('a run that stops halfway resumes from the chain: same contract, nothing se
+ 
+ test('a run stopped before the deploy landed resumes at the planned address; a used nonce stops it',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT(),owner=await deployer.getAddress();
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT(),owner=await deployer.getAddress();
+   const nonce=await provider.getTransactionCount(owner),plan={deployer:owner,signer:key.address,revealCommit:commit,contract:ethers.getCreateAddress({from:owner,nonce}),planNonce:nonce,steps:[]};
+   const d=await deployMainnet({deployer,revealSigner:key,revealCommit:commit,cfg,resume:plan,timing:FAST});
+   assert.equal(d.contract,plan.contract);assert.deepEqual(d.readBackMismatch,[]);
+@@ -194,11 +195,11 @@ test('a run stopped before the deploy landed resumes at the planned address; a u
+ 
+ // A step whose gas is cut runs out and is mined with status 0: what a reverted transaction really looks like.
+ const cutGas=(deployer,fn,times=Infinity)=>{const sel=ethers.id(fn).slice(0,10);let left=times;return new Proxy(deployer,{get(t,k){
+- if(k==='sendTransaction')return tx=>t.sendTransaction(tx.data?.startsWith(sel)&&left-->0?{...tx,gasLimit:BigInt(ethers.getBytes(tx.data).length*16+21100)}:tx);
++ if(k==='signTransaction')return tx=>t.signTransaction(tx.data?.startsWith(sel)&&left-->0?{...tx,gasLimit:BigInt(ethers.getBytes(tx.data).length*16+21100)}:tx);
+  const v=t[k];return typeof v==='function'?v.bind(t):v;}});};
+ test('a reverted step is never recorded as done, and the reveal commitment gets a fresh try',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer);let last;
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer);let last;
+   await assert.rejects(deployMainnet({deployer:cutGas(deployer,'approvePaidPrice()'),revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST,checkpoint:s=>{last=s;}}),/TX_FAILED approvePaidPrice/);
+   assert.deepEqual(last.steps.map(x=>x.name),['deploy EmberEvoGenesis','setRevealURIs (not locked)','setRevealCommit','addPaymentToken(USDC, 1600 GOLD)']);
+   const again=await deployMainnet({deployer:cutGas(deployer,'setRevealCommit(bytes32,uint256,bytes)',1),revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
+@@ -213,7 +214,7 @@ test('read-backs the next steps depend on are compared: a wrong answer from the
+   ['paymentTokens',(r,tx,cfg)=>tx.data.toLowerCase().includes(cfg.usdc.slice(2).toLowerCase())?abi.encodeFunctionResult('paymentTokens',[abi.decodeFunctionResult('paymentTokens',r)[0]^(1n<<216n)]):r,'paymentTokens(USDC).usableAt']];
+  for(const [fn,tamper,field] of cases){
+   const {rpc,provider}=await chain(1);try{
+-   const deployer=await provider.getSigner(0),cfg=await standIns(deployer),sel=abi.getFunction(fn).selector;let done=false;
++   const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),sel=abi.getFunction(fn).selector;let done=false;
+    const signer=new Proxy(deployer,{get(t,k){if(k==='call')return async tx=>{const r=await t.call(tx);return done&&tx.data.startsWith(sel)?tamper(r,tx,cfg):r;};const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+    const d=await deployMainnet({deployer:signer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST,checkpoint:s=>{if(s.steps.length===6)done=true;}});
+    assert.ok(d.readBackMismatch.includes(field),field+': '+d.readBackMismatch);
+@@ -229,7 +230,7 @@ test('the Worker gives the paid signer the bundled list root',()=>{
+ 
+ test('a real read-back mismatch is reported',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg={...await standIns(deployer),name:'Another Name'};
++  const deployer=testAuthority(0).connect(provider),cfg={...await standIns(deployer),name:'Another Name'};
+   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
+   assert.deepEqual(d.readBackMismatch,['name']);
+  }finally{await rpc.disconnect();}
+@@ -293,7 +294,7 @@ test('Safe files: decoded calls, the Transaction Builder checksum, and the calld
+ 
+ test('the Safe files are refused when the chain no longer matches the record',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),other=testAuthority(7).address;
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),other=testAuthority(7).address;
+   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
+   const g=new ethers.Contract(d.contract,artifacts[GENESIS].abi,deployer),safe=new ethers.Wallet(testAuthority(4).privateKey,provider),state=()=>chainState(provider,d);
+   checkAccept(await state(),d);
+@@ -340,7 +341,7 @@ test('Safe file checks: one stale read cannot pass a check, and one pass reads o
+  await assert.rejects(stableHead({getBlockNumber:async()=>answers.shift()??5},6,{tries:2,ms:0}),/HEAD_BEHIND_RECORD/);
+  answers=[7,8,8,8];assert.equal(await stableHead({getBlockNumber:async()=>answers.shift()},0,{ms:0}),8);
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer);
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer);
+   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
+   assert.equal(recordBlock(d),d.steps.at(-1).blockNumber);
+   const head=await provider.getBlockNumber(),g=new ethers.Contract(d.contract,artifacts[GENESIS].abi,deployer);
+@@ -406,13 +407,14 @@ test('a resume funds only what is left',()=>{
+ 
+ test('a resume outbids the transaction a stopped run left waiting, and survives a lagging RPC',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
+-  let saved=null,count=0;const fake='0x'+'cd'.repeat(32);
+-  const stuck=new Proxy(deployer,{get(t,k){
+-   if(k==='sendTransaction')return async tx=>{if(++count>=3)return {hash:fake};return t.sendTransaction(tx);};   // from the third step on nothing lands
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  let saved=null,count=0;
++  const lossy=new Proxy(deployer.provider,{get(t,k){
++   if(k==='broadcastTransaction')return async raw=>{if(++count>=3)return {};return t.broadcastTransaction(raw);};   // from the third step on nothing lands
+    const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  const stuck=new Proxy(deployer,{get(t,k){if(k==='provider')return lossy;const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+   await assert.rejects(deployMainnet({deployer:stuck,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:2,stepTimeoutMs:3,visibleTries:40}}),/STEP_STUCK setRevealCommit/);
+-  assert.equal(saved.steps.length,2);assert.equal(saved.pending.name,'setRevealCommit');assert.ok(saved.pending.fee.maxFeePerGas);assert.equal(saved.pending.hashes[0],fake);
++  assert.equal(saved.steps.length,2);assert.equal(saved.pending.name,'setRevealCommit');assert.ok(saved.pending.fee.maxFeePerGas);assert.ok(saved.pending.hashes.length>=1);
+   const {signer,sent}=laggingDeployer(deployer);
+   const d=await deployMainnet({deployer:signer,revealSigner:key,revealCommit:commit,cfg,resume:saved,timing:{pollMs:1,visibleTries:200,visibleReads:2,stepTimeoutMs:2000}});
+   assert.equal(d.contract,saved.contract);assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6);
+@@ -422,10 +424,10 @@ test('a resume outbids the transaction a stopped run left waiting, and survives
+ 
+ test('an RPC error while resuming is not "no code": the mined deploy is not taken for missing',async()=>{
+  const {rpc,provider}=await chain(1);try{
+-  const deployer=await provider.getSigner(0),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer),key=testAuthority(1),commit=COMMIT();
+   let saved=null,count=0;
+   const failing=new Proxy(deployer,{get(t,k){
+-   if(k==='sendTransaction')return async tx=>{if(++count>=2)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.sendTransaction(tx);};
++   if(k==='signTransaction')return async tx=>{if(++count>=2)throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});return t.signTransaction(tx);};
+    const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+   await assert.rejects(deployMainnet({deployer:failing,revealSigner:key,revealCommit:commit,cfg,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));},timing:{pollMs:1,attempts:1,stepTimeoutMs:3,visibleTries:40}}),/rpc down/);
+   let errors=3;
+@@ -435,3 +437,18 @@ test('an RPC error while resuming is not "no code": the mined deploy is not take
+   assert.equal(d.contract,saved.contract);assert.deepEqual(d.readBackMismatch,[]);
+  }finally{await rpc.disconnect();}
+ });
++
++test('audit 8b5de2de finding 8: the storage slot is read only from the code the record names',async()=>{
++ const {rpc,provider}=await chain(1);try{
++  const deployer=testAuthority(0).connect(provider),cfg=await standIns(deployer);
++  const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:COMMIT(),cfg,timing:FAST});
++  assert.equal(MAINNET.reviewed.extraTokenCountSlot,11);
++  assert.equal((await chainState(provider,d)).extraTokens,'1');
++  await assert.rejects(chainState(provider,{...d,codeHash:ethers.id('another build')}),/CODE_NOT_RECORDED_BUILD/);
++  // the record names the code at another address: the hash agrees and it is still not the reviewed build
++  const other=cfg.usdc,code=await provider.getCode(other);
++  await assert.rejects(chainState(provider,{...d,contract:other,codeHash:ethers.keccak256(code)}),/CODE_NOT_RECORDED_BUILD .*not the reviewed build/);
++  // another chain's record has no reviewed build to compare with here: the recorded hash is the check
++  await assert.rejects(chainState(provider,{...d,chainId:11155111}),/another chain/);
++ }finally{await rpc.disconnect();}
++});
+
+--- Submission13/tests/contract/deploy-mainnet-cli.test.mjs
++++ Submission14/tests/contract/deploy-mainnet-cli.test.mjs
+@@ -55,13 +55,14 @@ function lagger(rpc,share){
+   return undefined;
+  };
+ }
++const FETCH_BAD_PORTS=new Set([1719,1720,1723,2049,3659,4045,4190,5060,5061,6000,6566,6665,6666,6667,6668,6669,6679,6697,10080]);
+ async function rpcServer(rpc,{lag=0}={}){
+  const fixed=answers(),behind=lagger(rpc,lag),state={rawSends:0,onRawSend:null,requests:0,script:null,sent:[]};
+  const one=async m=>{
+   state.requests++;
+   const f=fixed(m);if(f!==undefined)return {jsonrpc:'2.0',id:m.id,result:f};
+-  const s=await state.script?.(m);if(s!==undefined)return {jsonrpc:'2.0',id:m.id,result:s};
+   try{
++   const s=await state.script?.(m);if(s!==undefined)return {jsonrpc:'2.0',id:m.id,result:s};
+    const b=lag?await behind(m):undefined;if(b!==undefined)return {jsonrpc:'2.0',id:m.id,result:b};
+    const result=await rpc.request({method:m.method,params:m.params??[]});
+    if(m.method==='eth_sendRawTransaction'){state.rawSends++;state.sent.push(ethers.Transaction.from(m.params[0]));await state.onRawSend?.(state.rawSends);}
+@@ -72,7 +73,11 @@ async function rpcServer(rpc,{lag=0}={}){
+   if(!q.url.endsWith(RPC_SECRET)){r.writeHead(401);r.end('{}');return;}
+   const j=JSON.parse(b),out=Array.isArray(j)?await Promise.all(j.map(one)):await one(j);
+   r.writeHead(200,{'content-type':'application/json'});r.end(JSON.stringify(out));});});
+- await new Promise(r=>server.listen(0,'127.0.0.1',r));
++ for(;;){
++  await new Promise(r=>server.listen(0,'127.0.0.1',r));
++  if(!FETCH_BAD_PORTS.has(server.address().port))break;
++  await new Promise(r=>server.close(r));
++ }
+  return {state,url:`http://127.0.0.1:${server.address().port}/${RPC_SECRET}`,close:()=>{server.closeAllConnections();server.close();}};
+ }
+ function run(file,args,env,{input,onSpawn}={}){
+@@ -201,19 +206,21 @@ test('the whole run through a lagging RPC: killed mid-run, resumed, refused a se
+ // Swarm audit 358f7f40: a resume through an RPC answering with well-formed old values, over real JSON-RPC, so ethers maps the node's own errors.
+ const USDC_GOLD='addPaymentToken(USDC, 1600 GOLD)',GATE=ethers.id('paymentTokens(address)').slice(0,10);
+ const COUNT='eth_getTransactionCount';
++// the block a reorg left at that height: another hash, none of the recorded transactions
++const anotherBlock=(m,entry)=>m.method==='eth_getBlockByNumber'&&m.params[1]===true&&BigInt(m.params[0])===BigInt(entry.blockNumber)?{hash:ethers.id('another block'),transactions:[]}:undefined;
+ const FAST_HTTP={pollMs:5,visibleTries:60,visibleReads:3,stepTimeoutMs:60,attempts:8};
+ async function stoppedRun(rpc,srv,{stopBefore,mined}){
+  const provider=mainnetProvider(srv.url),key=testAuthority(3),deployer=new ethers.Wallet(key.privateKey,provider);
+  const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP};
+  let saved=null;
+  const sendsBefore=srv.state.rawSends;
+- const realSend=deployer.sendTransaction.bind(deployer);let count=0;
+- deployer.sendTransaction=async tx=>{
++ const realSend=deployer.signTransaction.bind(deployer);let count=0;
++ deployer.signTransaction=async tx=>{
+   if(++count===stopBefore&&!mined)await rpc.request({method:'evm_setAutomine',params:[false]});
+   if(count>stopBefore)throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});
+   return realSend(tx);};
+  await assert.rejects(deployMainnet({...input,timing:{...FAST_HTTP,attempts:1},checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));}}));
+- delete deployer.sendTransaction;
++ delete deployer.signTransaction;
+  srv.state.onRawSend=null;srv.state.sent=[];
+  assert.ok(srv.state.rawSends-sendsBefore>=stopBefore);
+  return {input,saved,provider,key};
+@@ -263,8 +270,8 @@ test('finding 1: a failed resume keeps what the record knows about the waiting t
+  try{
+   const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:false});
+   let last=null;
+-  const failing=new Proxy(input.deployer,{get(t,k){if(k==='sendTransaction')return async()=>{throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});};const v=t[k];return typeof v==='function'?v.bind(t):v;}});
+-  await assert.rejects(deployMainnet({...input,deployer:failing,resume:saved,timing:{...FAST_HTTP,attempts:2},checkpoint:s=>{last=JSON.parse(JSON.stringify(s));}}),/rpc down|STEP_STUCK/);
++  const failing=new Proxy(input.deployer,{get(t,k){if(k==='signTransaction')return async()=>{throw Object.assign(Error('rpc down'),{code:'SERVER_ERROR'});};const v=t[k];return typeof v==='function'?v.bind(t):v;}});
++  await assert.rejects(deployMainnet({...input,deployer:failing,resume:saved,timing:{...FAST_HTTP,attempts:2},checkpoint:s=>{last=JSON.parse(JSON.stringify(s));}}),/STEP_STUCK .*SERVER_ERROR/);
+   assert.deepEqual(last.pending.hashes,saved.pending.hashes);assert.deepEqual(last.pending.fee,saved.pending.fee);assert.equal(last.pending.nonce,saved.pending.nonce);
+  }finally{srv.close();await rpc.disconnect();}
+ });
+@@ -341,30 +348,16 @@ test('audit 161d71af finding 2: a recorded hash the chain no longer shows leaves
+  try{
+   const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
+   const top=saved.steps.at(-1),record={...saved};delete record.pending;
+-  srv.state.script=m=>{if(m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash)return null;};
++  srv.state.script=m=>{if(m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash)return null;return anotherBlock(m,top);};
+   const before=srv.state.rawSends,d=await deployMainnet({...input,resume:record});
+   assert.equal(srv.state.rawSends,before+2,'the step is on the chain: it is not sent again');
+   assert.deepEqual(d.steps.map(s=>s.name).slice(3),['approvePaidPrice','transferOwnership(Safe)']);assert.deepEqual(d.readBackMismatch,[]);
+  }finally{srv.close();await rpc.disconnect();}
+ });
+ 
+-test('audit 161d71af finding 2: a node that is behind the recorded block does not cost the record its entry',{timeout:300000},async()=>{
+- const {rpc}=await standInChain(),srv=await rpcServer(rpc);
+- try{
+-  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
+-  const top=saved.steps.at(-1),record={...saved};delete record.pending;let wrote=null;
+-  srv.state.script=m=>{
+-   if(m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash)return null;
+-   if(m.method==='eth_blockNumber')return ethers.toQuantity(top.blockNumber-1);
+-  };
+-  await assert.rejects(deployMainnet({...input,resume:record,checkpoint:s=>{wrote=s;}}),/RECEIPT_NOT_VISIBLE/);
+-  assert.equal(wrote,null,'the record was not rewritten');
+- }finally{srv.close();await rpc.disconnect();}
+-});
+-
+ const lowGasOnce=(deployer,selector,limit)=>{
+- const real=deployer.sendTransaction.bind(deployer);let done=false;
+- deployer.sendTransaction=async tx=>{if(!done&&(tx.data??'').startsWith(selector)){done=true;return real({...tx,gasLimit:limit});}return real(tx);};
++ const real=deployer.signTransaction.bind(deployer);let done=false;
++ deployer.signTransaction=async tx=>{if(!done&&(tx.data??'').startsWith(selector)){done=true;return real({...tx,gasLimit:limit});}return real(tx);};
+ };
+ test('audit 161d71af finding 3: a reverted deploy is in the record: stale nonce reads get PLANNED_NONCE_USED at once, nothing is sent',{timeout:300000},async()=>{
+  const {rpc}=await standInChain(),srv=await rpcServer(rpc);
+@@ -390,10 +383,10 @@ test('audit 161d71af finding 3: a reverted attempt that a retry followed is coun
+   const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP};
+   const commitSel=ethers.id('setRevealCommit(bytes32,uint256,bytes)').slice(0,10);
+   lowGasOnce(deployer,commitSel,30_000n);
+-  const real=deployer.sendTransaction;let saved=null;
+-  deployer.sendTransaction=async tx=>{if((tx.data??'').startsWith(ethers.id('addPaymentToken(address,uint256)').slice(0,10)))throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});return real(tx);};
++  const real=deployer.signTransaction;let saved=null;
++  deployer.signTransaction=async tx=>{if((tx.data??'').startsWith(ethers.id('addPaymentToken(address,uint256)').slice(0,10)))throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});return real(tx);};
+   await assert.rejects(deployMainnet({...input,timing:{...FAST_HTTP,attempts:2},checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));}}));
+-  delete deployer.sendTransaction;
++  delete deployer.signTransaction;
+   assert.equal(saved.failed.length,1);assert.equal(saved.failed[0].name,'setRevealCommit');assert.equal(saved.steps.length,3);
+   const n=await provider.getTransactionCount(testAuthority(3).address);
+   assert.equal(n,saved.planNonce+saved.steps.length+saved.failed.length);
+@@ -425,8 +418,8 @@ test('audit 161d71af finding 5: errors that say nothing about a bid do not raise
+  try{
+   const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
+   const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP};
+-  const real=deployer.sendTransaction.bind(deployer);let tips=[],fails=7;
+-  deployer.sendTransaction=async tx=>{tips.push(tx.maxPriorityFeePerGas);if(fails-->0)throw Object.assign(Error('server response 502'),{code:'SERVER_ERROR'});return real(tx);};
++  const real=deployer.signTransaction.bind(deployer);let tips=[],fails=7;
++  deployer.signTransaction=async tx=>{tips.push(tx.maxPriorityFeePerGas);if(fails-->0)throw Object.assign(Error('server response 502'),{code:'SERVER_ERROR'});return real(tx);};
+   srv.state.script=m=>{if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);};
+   const d=await deployMainnet(input);
+   assert.deepEqual(d.readBackMismatch,[]);
+@@ -437,11 +430,11 @@ test('audit 161d71af finding 5: errors that say nothing about a bid do not raise
+   const provider=mainnetProvider(srv2.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
+   const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:{...FAST_HTTP,attempts:20}};
+   const tips=[];
+-  deployer.sendTransaction=async tx=>{tips.push(tx.maxPriorityFeePerGas);throw Object.assign(Error('replacement fee too low'),{code:'REPLACEMENT_UNDERPRICED'});};
++  deployer.signTransaction=async tx=>{tips.push(tx.maxPriorityFeePerGas);throw Object.assign(Error('replacement fee too low'),{code:'REPLACEMENT_UNDERPRICED'});};
+   srv2.state.script=m=>{if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);};
+   await assert.rejects(deployMainnet(input),/TIP_CEILING/);
+   for(let i=1;i<tips.length;i++)assert.ok(tips[i]>tips[i-1]);
+-  assert.ok(tips.at(-1)<=3_000_000_000n,'tip '+tips.at(-1));assert.ok(tips.at(-1)*125n/100n+1n>3_000_000_000n);
++  assert.equal(tips.at(-1),3_000_000_000n,'the last bid is the ceiling itself');assert.ok(tips.at(-2)*125n/100n+1n>3_000_000_000n);
+  }finally{srv2.close();await c.rpc.disconnect();}
+ });
+ 
+@@ -521,9 +514,10 @@ test('audit 161d71af review: the recorded step below a waiting transaction left
+    if(m.method===COUNT)return ethers.toQuantity(n);
+    if(m.method==='eth_call'&&m.params[0].data?.startsWith(ethers.id('revealCommit()').slice(0,10)))return ethers.ZeroHash;
+    if(m.method==='eth_estimateGas')return '0x30000';
++   return anotherBlock(m,top);
+   };
+   const nonces=[],deployer=input.deployer;
+-  deployer.sendTransaction=async tx=>{nonces.push(tx.nonce);throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});};
++  deployer.signTransaction=async tx=>{nonces.push(tx.nonce);throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});};
+   await assert.rejects(deployMainnet({...input,resume:saved,timing:{...FAST_HTTP,attempts:1}}),/stopped by the test/);
+   assert.deepEqual(nonces,[n]);
+  }finally{srv.close();await rpc.disconnect();}
+@@ -534,10 +528,366 @@ test('audit 161d71af review: a timeout before anything is sent does not raise th
+  try{
+   const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
+   srv.state.script=m=>{if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);};
+-  const realEstimate=deployer.estimateGas.bind(deployer),realSend=deployer.sendTransaction.bind(deployer);let fails=3,first=null;
++  const realEstimate=deployer.estimateGas.bind(deployer),realSend=deployer.signTransaction.bind(deployer);let fails=3,first=null;
+   deployer.estimateGas=async tx=>{if(fails-->0)throw Object.assign(Error('timeout'),{code:'TIMEOUT'});return realEstimate(tx);};
+-  deployer.sendTransaction=async tx=>{first??=tx.maxPriorityFeePerGas;return realSend(tx);};
++  deployer.signTransaction=async tx=>{first??=tx.maxPriorityFeePerGas;return realSend(tx);};
+   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP});
+   assert.deepEqual(d.readBackMismatch,[]);assert.equal(first,1_000_000_000n);
+  }finally{srv.close();await rpc.disconnect();}
+ });
++
++// Swarm audit 8b5de2de
++test('audit 8b5de2de finding 1: a missing receipt alone takes no entry out: the block still holds it, or no node shows the block',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const top=saved.steps.at(-1),done={...saved};delete done.pending;
++  assert.match(top.blockHash,/^0x[0-9a-f]{64}$/);
++  const failedRecord={...done,steps:saved.steps.slice(0,-1),failed:[top]};
++  const noReceipt=m=>m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash;
++  const answers=[
++   ['the real block, which holds it',()=>undefined],
++   ['a node without the block',m=>m.method==='eth_getBlockByNumber'&&m.params[1]===true?null:undefined],
++   ['the recorded block with a short list',m=>m.method==='eth_getBlockByNumber'&&m.params[1]===true?{hash:top.blockHash,transactions:[]}:undefined],
++   ['another block that lists it',m=>m.method==='eth_getBlockByNumber'&&m.params[1]===true?{hash:ethers.id('another block'),transactions:[top.hash]}:undefined]];
++  for(const [what,answer] of answers)for(const record of [done,failedRecord]){
++   let wrote=null;
++   srv.state.script=m=>{if(noReceipt(m))return null;return answer(m);};
++   // a head past the block, as a current head tracker reports it
++   await assert.rejects(deployMainnet({...input,resume:record,checkpoint:s=>{wrote=s;}}),/RECEIPT_NOT_VISIBLE/,what);
++   assert.equal(wrote,null,what+': the record was not rewritten');
++  }
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 2: a reply lost after the node took the transaction: the hash was in the record first, and the step is recorded',{timeout:300000},async()=>{
++ for(const lost of [{code:'TIMEOUT',message:'timeout'},{code:'SERVER_ERROR',message:'server response 502'}]){
++  const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++  try{
++   const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
++   // flat fees: a 502 raises nothing, so the retry is the same transaction and the node's 'nonce too low' answers about the hash that landed
++   if(lost.code==='SERVER_ERROR'){const flat=new ethers.FeeData(null,500n*10n**9n,1_000_000_000n);provider.getFeeData=async()=>flat;}
++   const real=provider.broadcastTransaction.bind(provider);let n=0,H=null,last=null,left=3;
++   provider.broadcastTransaction=async raw=>{
++    const h=ethers.Transaction.from(raw).hash;
++    assert.ok(JSON.stringify(last).includes(h),'the record holds the hash before the send');
++    if(++n!==2)return real(raw);
++    await real(raw);H=h;throw Object.assign(Error(lost.message),{code:lost.code});
++   };
++   // the receipt comes a little late, so the retry meets 'nonce too low' first
++   srv.state.script=m=>{if(m.method==='eth_getTransactionReceipt'&&m.params[0]===H&&left-->0)return null;};
++   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP,checkpoint:s=>{last=JSON.parse(JSON.stringify(s));}});
++   assert.deepEqual(d.readBackMismatch,[]);assert.equal(d.steps.length,6,lost.code);assert.deepEqual(d.notInRecord,[]);
++   assert.equal(d.steps[1].hash,H);
++  }finally{srv.close();await rpc.disconnect();}
++ }
++});
++
++test('audit 8b5de2de finding 2: a send a node refuses leaves no hash behind: a spent nonce still stops the run as NONCE_MOVED',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved,provider}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const n=await provider.getTransactionCount(testAuthority(3).address);
++  const record={...saved,steps:saved.steps.slice(0,-1)};delete record.pending;
++  let wrote=null,refused=false;
++  // the last step landed under a hash the run never knew; a stale gate and stale counts send the next attempt at the spent nonce. The node says no, and the next count is fresh
++  srv.state.script=m=>{
++   if(m.method==='eth_sendRawTransaction')refused=true;
++   if(m.method==='eth_call'&&m.params[0].data?.startsWith(GATE))return ethers.ZeroHash;
++   if(m.method==='eth_estimateGas')return '0x30000';
++   if(m.method===COUNT&&!refused)return ethers.toQuantity(n-1);
++  };
++  await assert.rejects(deployMainnet({...input,resume:record,checkpoint:s=>{wrote=s;}}),/NONCE_MOVED/);
++  assert.equal(wrote.pending,undefined);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 3: a refusal in any client\'s words raises the next bid; other errors do not',{timeout:300000},async()=>{
++ const refusals=['replacement transaction underpriced','insufficient gas price to replace existing transaction','already imported','transaction priority fee below minimum required priority fee 1000000000','transaction underpriced','could not replace existing tx','fee too low','already known','Known transaction'];
++ for(const [word,rises] of [...refusals.map(w=>[w,true]),['rate limited',false]]){
++  const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++  try{
++   const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider),tips=[];let left=3;
++   srv.state.script=m=>{
++    if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);
++    if(m.method==='eth_sendRawTransaction'&&tips.length<4){tips.push(ethers.Transaction.from(m.params[0]).maxPriorityFeePerGas);if(left-->0)throw Error(word);}
++   };
++   const d=await deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP});
++   assert.deepEqual(d.readBackMismatch,[]);
++   for(let i=1;i<tips.length;i++)rises?assert.ok(tips[i]>tips[i-1],word):assert.equal(tips[i],tips[i-1],word);
++  }finally{srv.close();await rpc.disconnect();}
++ }
++});
++
++test('audit 8b5de2de finding 4: a refill keeps the later waiting transaction in every checkpoint',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:false});
++  const top=saved.steps.at(-1),n=saved.pending.nonce-1,h4=saved.pending.hashes[0];
++  srv.state.script=m=>{
++   if(m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash)return null;
++   if(m.method===COUNT)return ethers.toQuantity(n);
++   if(m.method==='eth_call'&&m.params[0].data?.startsWith(ethers.id('revealCommit()').slice(0,10)))return ethers.ZeroHash;
++   if(m.method==='eth_estimateGas')return '0x30000';
++   return anotherBlock(m,top);
++  };
++  const provider=input.deployer.provider,real=provider.broadcastTransaction.bind(provider),points=[];
++  provider.broadcastTransaction=async()=>({});   // the node takes the refill and does not mine it
++  try{await assert.rejects(deployMainnet({...input,resume:saved,timing:{...FAST_HTTP,attempts:2},checkpoint:s=>{points.push(JSON.parse(JSON.stringify(s)));}}),/STEP_STUCK setRevealCommit/);}
++  finally{provider.broadcastTransaction=real;}
++  assert.ok(points.length>=3);
++  for(const p of points)assert.ok(JSON.stringify(p).includes(h4),'every checkpoint names the waiting transaction');
++  const last=points.at(-1);
++  assert.equal(last.pending.name,'setRevealCommit');assert.equal(last.pending.nonce,n);
++  assert.equal(last.queued.length,1);assert.deepEqual(last.queued[0],saved.pending);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 4: a resume records what landed, in nonce order, and watches and outbids what did not',{timeout:300000},async()=>{
++ let {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  // both landed while the run was stopped
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const [p,q]=saved.steps.slice(2),n=saved.planNonce+2;
++  const record={...saved,steps:saved.steps.slice(0,2),
++   pending:{name:p.name,nonce:n,hashes:p.hashes,fee:null,gasLimit:null},queued:[{name:q.name,nonce:n+1,hashes:q.hashes,fee:null,gasLimit:null}]};
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.steps.map(s=>s.name).slice(2,4),[p.name,q.name]);assert.deepEqual(d.steps[3].hashes,q.hashes);
++  assert.deepEqual(srv.state.sent.map(t=>t.nonce),[n+2,n+3],'only the two missing transactions');assert.deepEqual(d.readBackMismatch,[]);assert.deepEqual(d.notInRecord,[]);
++ }finally{srv.close();await rpc.disconnect();}
++ ({rpc}=await standInChain());srv=await rpcServer(rpc);
++ try{
++  // the refill lands; the later step's transaction no node mined is outbid at its own nonce, and its hash stays in the record
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:2,mined:true});
++  assert.equal(saved.steps.length,2);
++  const n=saved.planNonce+2,fake=ethers.id('held by some node'),bid=1_200_000_000n;
++  const record={...saved,pending:{name:'setRevealCommit',nonce:n,hashes:[],fee:null,gasLimit:null},
++   queued:[{name:USDC_GOLD,nonce:n+1,hashes:[fake],fee:{maxFeePerGas:String(500n*10n**9n),maxPriorityFeePerGas:String(bid)},gasLimit:null}]};
++  srv.state.script=m=>{if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);};
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.readBackMismatch,[]);assert.equal(srv.state.sent[1].nonce,n+1);
++  assert.ok(srv.state.sent[1].maxPriorityFeePerGas>=bid*125n/100n,'it outbids the waiting one');
++  assert.ok(d.steps[3].hashes.includes(fake));
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 5: the last bid goes to the ceiling when 10% fits, with a fee cap above the tip, then the run waits',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider),raws=[];
++  provider.broadcastTransaction=async raw=>{raws.push(ethers.Transaction.from(raw));return {};};   // every bid is taken and none is mined
++  provider.getTransaction=async()=>({});
++  srv.state.script=m=>{if(m.method==='eth_maxPriorityFeePerGas')return ethers.toQuantity(1_000_000_000n);};
++  await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:{...FAST_HTTP,attempts:9}}),/STEP_STUCK deploy EmberEvoGenesis: TIP_CEILING/);
++  const tips=raws.map(t=>t.maxPriorityFeePerGas);
++  assert.equal(tips.at(-1),3_000_000_000n);assert.equal(new Set(tips).size,tips.length,'nothing above the ceiling, nothing twice');
++  for(let i=1;i<raws.length;i++){
++   assert.ok(raws[i].maxPriorityFeePerGas>=raws[i-1].maxPriorityFeePerGas*110n/100n,'a node takes it');
++   assert.ok(raws[i].maxFeePerGas>=raws[i-1].maxFeePerGas*110n/100n,'a node takes it');
++  }
++  for(const t of raws)assert.ok(t.maxFeePerGas>=t.maxPriorityFeePerGas);
++  // a market fee cap level with the tip: 10% over the last cap is under the ceiling, and the cap must still reach the tip
++  raws.length=0;const flat=new ethers.FeeData(null,1_000_000_000n,1_000_000_000n);provider.getFeeData=async()=>flat;
++  await assert.rejects(deployMainnet({deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:{...FAST_HTTP,attempts:9}}),/STEP_STUCK deploy EmberEvoGenesis: TIP_CEILING/);
++  assert.equal(raws.at(-1).maxPriorityFeePerGas,3_000_000_000n);assert.equal(raws.at(-1).maxFeePerGas,3_000_000_000n);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 6: a gate says done, no receipt, and the first counts are stale: the run waits for a count past the nonce',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved,provider}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const n=await provider.getTransactionCount(testAuthority(3).address);
++  const record={...saved,steps:saved.steps.filter(x=>x.name!==USDC_GOLD),pending:{name:USDC_GOLD,nonce:n-1,hashes:[ethers.id('lost')],fee:null,gasLimit:null}};
++  let stale=8;srv.state.sent=[];
++  srv.state.script=m=>{if(m.method===COUNT&&stale-->0)return ethers.toQuantity(n-1);};
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(srv.state.sent.map(t=>t.nonce),[n,n+1]);assert.deepEqual(d.readBackMismatch,[]);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de finding 7: a step the record lost is named, and USDC usableAt is still checked',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const record={...saved,steps:saved.steps.filter(x=>x.name!==USDC_GOLD)};delete record.pending;
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.readBackMismatch,[]);assert.deepEqual(d.notInRecord,[USDC_GOLD]);
++  const again={...record,steps:d.steps,planNonce:saved.planNonce};
++  const wrong=async m=>{
++   if(m.method!=='eth_call'||!m.params[0].data?.startsWith(GATE)||!m.params[0].data.toLowerCase().includes(MAINNET.usdc.slice(2).toLowerCase()))return undefined;
++   const p=BigInt(await rpc.request({method:'eth_call',params:m.params}));
++   return ethers.toBeHex((p&((1n<<216n)-1n))|(1000n<<216n),32);
++  };
++  srv.state.script=wrong;
++  const d2=await deployMainnet({...input,resume:again,timing:{...FAST_HTTP,visibleTries:10}});
++  assert.ok(d2.readBackMismatch.includes('paymentTokens(USDC).usableAt'),'before the deploy');
++  srv.state.script=async m=>{
++   const r=await wrong(m);if(r===undefined)return undefined;
++   return ethers.toBeHex((BigInt(r)&((1n<<216n)-1n))|(4_000_000_000n<<216n),32);
++  };
++  const d3=await deployMainnet({...input,resume:again,timing:{...FAST_HTTP,visibleTries:10}});
++  assert.ok(d3.readBackMismatch.includes('paymentTokens(USDC).usableAt'),'after now');
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++const FAKE_FEE={maxFeePerGas:String(500n*10n**9n),maxPriorityFeePerGas:String(1_200_000_000n)};
++const oneGwei=m=>m.method==='eth_maxPriorityFeePerGas'?ethers.toQuantity(1_000_000_000n):undefined;
++
++test('audit 8b5de2de review: a hash no node took does not open the estimate fallback: a step that now reverts is not sent',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved,provider}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const n=await provider.getTransactionCount(testAuthority(3).address),record={...saved,steps:saved.steps.slice(0,-1)};delete record.pending;
++  let estimates=0,sends=0;
++  srv.state.script=m=>{
++   if(m.method==='eth_call'&&m.params[0].data?.startsWith(GATE))return ethers.ZeroHash;
++   if(m.method===COUNT)return ethers.toQuantity(n-1);
++   if(m.method==='eth_estimateGas'&&++estimates===1)return '0x30000';
++  };
++  const real=input.deployer.provider.broadcastTransaction;
++  input.deployer.provider.broadcastTransaction=async()=>{sends++;throw Object.assign(Error('upstream connect error'),{code:'SERVER_ERROR'});};
++  try{await assert.rejects(deployMainnet({...input,resume:record,timing:{...FAST_HTTP,attempts:3}}),/STEP_STUCK/);}
++  finally{input.deployer.provider.broadcastTransaction=real;}
++  assert.equal(sends,1,'the second estimate reverts and nothing more goes out');
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++const afterReorg=(top,n)=>m=>{
++ if(m.method==='eth_getTransactionReceipt'&&m.params[0]===top.hash)return null;
++ if(m.method===COUNT)return ethers.toQuantity(n);
++ if(m.method==='eth_call'&&m.params[0].data?.startsWith(ethers.id('revealCommit()').slice(0,10)))return ethers.ZeroHash;
++ if(m.method==='eth_estimateGas')return '0x30000';
++ return anotherBlock(m,top);
++};
++test('audit 8b5de2de review: a stop right after a dropped entry: the next resume still fills the free nonce first',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:false});
++  const top=saved.steps.at(-1),n=saved.pending.nonce-1;
++  srv.state.script=afterReorg(top,n);
++  let wrote=null;
++  await assert.rejects(deployMainnet({...input,resume:saved,checkpoint:s=>{wrote=JSON.parse(JSON.stringify(s));throw Error('the machine stopped');}}),/the machine stopped/);
++  assert.equal(wrote.pending,undefined,'the waiting transaction above the free nonce is not pending');
++  assert.deepEqual(wrote.queued,[saved.pending]);assert.equal(wrote.steps.length,saved.steps.length-1);
++  // the entry is gone from this record, so the script keeps answering for the chain the reorg left
++  const nonces=[],deployer=input.deployer;
++  deployer.signTransaction=async tx=>{nonces.push(tx.nonce);throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});};
++  let last=null;
++  await assert.rejects(deployMainnet({...input,resume:wrote,timing:{...FAST_HTTP,attempts:1},checkpoint:s=>{last=JSON.parse(JSON.stringify(s));}}),/stopped by the test/);
++  delete deployer.signTransaction;
++  assert.deepEqual(nonces,[n]);assert.deepEqual(last.queued,[saved.pending]);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: a pending transaction above the real count does not hold the run there: the free nonce is filled first',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:false});
++  const top=saved.steps.at(-1),n=saved.pending.nonce-1;
++  // the record a resume wrote when a stale count put it on the waiting transaction's nonce after the step below left the chain
++  const record={...saved,steps:saved.steps.slice(0,-1)};
++  srv.state.script=afterReorg(top,n);
++  const nonces=[],deployer=input.deployer;let last=null;
++  deployer.signTransaction=async tx=>{nonces.push(tx.nonce);throw Object.assign(Error('stopped by the test'),{code:'SERVER_ERROR'});};
++  await assert.rejects(deployMainnet({...input,resume:record,timing:{...FAST_HTTP,attempts:1},checkpoint:s=>{last=JSON.parse(JSON.stringify(s));}}),/stopped by the test/);
++  delete deployer.signTransaction;
++  assert.deepEqual(nonces,[n]);assert.deepEqual(last.queued,[saved.pending]);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: a step whose tries reverted goes out at the nonce of a later waiting transaction, over its bid; a stale step does not',{timeout:300000},async()=>{
++ let {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ const commitSel=ethers.id('setRevealCommit(bytes32,uint256,bytes)').slice(0,10);
++ try{
++  const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
++  const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:FAST_HTTP};
++  const real=deployer.signTransaction.bind(deployer);let saved=null;
++  deployer.signTransaction=async tx=>real((tx.data??'').startsWith(commitSel)?{...tx,gasLimit:30_000n}:tx);
++  await assert.rejects(deployMainnet({...input,checkpoint:s=>{saved=JSON.parse(JSON.stringify(s));}}),/TX_FAILED setRevealCommit/);
++  delete deployer.signTransaction;
++  const n=saved.planNonce+saved.steps.length+saved.failed.length,fake=ethers.id('later step');assert.equal(saved.failed.length,3);
++  const record={...saved,queued:[{name:USDC_GOLD,nonce:n,hashes:[fake],fee:FAKE_FEE,gasLimit:null}]};delete record.pending;
++  const realGet=provider.getTransaction.bind(provider);
++  provider.getTransaction=async h=>h===fake?{}:realGet(h);   // some node holds it
++  srv.state.script=oneGwei;srv.state.sent=[];
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.readBackMismatch,[]);assert.equal(srv.state.sent[0].nonce,n);
++  assert.ok(srv.state.sent[0].maxPriorityFeePerGas>=1_500_000_000n,'it outbids the waiting one');
++ }finally{srv.close();await rpc.disconnect();}
++ ({rpc}=await standInChain());srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:2,mined:true});
++  const n=saved.planNonce+2,fake=ethers.id('later step'),record={...saved,queued:[{name:USDC_GOLD,nonce:n,hashes:[fake],fee:FAKE_FEE,gasLimit:null}]};delete record.pending;
++  const provider=input.deployer.provider,realGet=provider.getTransaction.bind(provider);
++  provider.getTransaction=async h=>h===fake?{}:realGet(h);
++  await assert.rejects(deployMainnet({...input,resume:record}),/RESUME_OUT_OF_ORDER setRevealCommit/);
++  provider.getTransaction=realGet;   // no node holds it: nothing to stop for, and no bid to beat
++  srv.state.script=oneGwei;srv.state.sent=[];
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.readBackMismatch,[]);assert.equal(srv.state.sent[0].nonce,n);assert.equal(srv.state.sent[0].maxPriorityFeePerGas,1_000_000_000n);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: a retry after a revert keeps the later waiting transaction in the record and bids over it',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:2,mined:true});
++  const n=saved.planNonce+2,fake=ethers.id('later step');
++  const record={...saved,pending:{name:'setRevealCommit',nonce:n,hashes:[],fee:null,gasLimit:null},queued:[{name:USDC_GOLD,nonce:n+1,hashes:[fake],fee:FAKE_FEE,gasLimit:null}]};
++  const provider=input.deployer.provider,realGet=provider.getTransaction.bind(provider);
++  provider.getTransaction=async h=>h===fake?{}:realGet(h);
++  lowGasOnce(input.deployer,ethers.id('setRevealCommit(bytes32,uint256,bytes)').slice(0,10),30_000n);
++  srv.state.script=oneGwei;srv.state.sent=[];
++  const points=[],d=await deployMainnet({...input,resume:record,checkpoint:s=>{points.push(JSON.parse(JSON.stringify(s)));}});
++  delete input.deployer.signTransaction;
++  assert.deepEqual(srv.state.sent.slice(0,2).map(t=>t.nonce),[n,n+1]);
++  assert.ok(srv.state.sent[1].maxPriorityFeePerGas>=1_500_000_000n,'it outbids the waiting one');
++  const atItsNonce=points.filter(p=>p.pending?.name==='setRevealCommit'&&p.pending.nonce===n+1);assert.ok(atItsNonce.length);
++  for(const p of atItsNonce.slice(0,-1))assert.ok(JSON.stringify(p.queued).includes(fake),'the record still names it');
++  assert.deepEqual(d.readBackMismatch,[]);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: a queued transaction that landed is recorded even when the pending one has no receipt, and nothing is listed twice',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:4,mined:true});
++  const [p,q]=saved.steps.slice(2),n=saved.planNonce+2;
++  const record={...saved,steps:saved.steps.slice(0,2),pending:{name:p.name,nonce:n,hashes:[ethers.id('lost')],fee:null,gasLimit:null},queued:[{name:q.name,nonce:n+1,hashes:q.hashes,fee:null,gasLimit:null}]};
++  srv.state.sent=[];
++  const points=[],d=await deployMainnet({...input,resume:record,checkpoint:s=>{points.push(JSON.parse(JSON.stringify(s)));}});
++  assert.deepEqual(srv.state.sent.map(t=>t.nonce),[n+2,n+3]);assert.deepEqual(d.readBackMismatch,[]);
++  assert.ok(d.steps.some(s=>s.name===q.name));assert.deepEqual(d.notInRecord,[p.name]);
++  for(const c of points)for(const x of c.queued??[])assert.ok(!(x.name===c.pending?.name&&x.nonce===c.pending?.nonce),'listed twice');
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: a later transaction that lands right after the refill is recorded under its own step',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const {input,saved}=await stoppedRun(rpc,srv,{stopBefore:2,mined:true});
++  const n=saved.planNonce+2,g=new ethers.Contract(saved.contract,artifacts[GENESIS].abi,input.deployer);
++  await rpc.request({method:'evm_setAutomine',params:[false]});
++  const tx=await input.deployer.sendTransaction({...await g.addPaymentToken.populateTransaction(MAINNET.usdc,MAINNET.usdcGoldCost),nonce:n+1,gasLimit:400_000n});
++  const record={...saved,pending:{name:'setRevealCommit',nonce:n,hashes:[],fee:null,gasLimit:null},queued:[{name:USDC_GOLD,nonce:n+1,hashes:[tx.hash],fee:null,gasLimit:null}]};
++  let mined=false;srv.state.onRawSend=async()=>{if(!mined){mined=true;await rpc.request({method:'evm_setAutomine',params:[true]});await rpc.request({method:'evm_mine',params:[]});await rpc.request({method:'evm_mine',params:[]});}};
++  const d=await deployMainnet({...input,resume:record});
++  assert.deepEqual(d.readBackMismatch,[]);assert.deepEqual(d.notInRecord,[]);
++  assert.equal(d.steps.find(s=>s.name===USDC_GOLD).hash,tx.hash);
++ }finally{srv.close();await rpc.disconnect();}
++});
++
++test('audit 8b5de2de review: STEP_STUCK carries the node\'s words, and an old error does not outlive a bid that was taken',{timeout:300000},async()=>{
++ const {rpc}=await standInChain(),srv=await rpcServer(rpc);
++ try{
++  const provider=mainnetProvider(srv.url),deployer=new ethers.Wallet(testAuthority(3).privateKey,provider);
++  const input={deployer,revealSigner:testAuthority(1),revealCommit:ethers.id('stale test reveal commit'),cfg:MAINNET,timing:{...FAST_HTTP,attempts:3}};
++  srv.state.script=m=>{if(m.method==='eth_sendRawTransaction')throw Error('tx fee exceeds the configured cap');};
++  await assert.rejects(deployMainnet(input),/STEP_STUCK deploy EmberEvoGenesis: UNKNOWN_ERROR \(.*tx fee exceeds the configured cap/);
++  srv.state.script=null;let n=0;
++  provider.broadcastTransaction=async()=>{if(++n===1)throw Object.assign(Error('server response 502'),{code:'SERVER_ERROR'});return {};};
++  provider.getTransaction=async()=>({});
++  await assert.rejects(deployMainnet(input),e=>/STEP_STUCK deploy EmberEvoGenesis/.test(e.message)&&!/SERVER_ERROR/.test(e.message));
++ }finally{srv.close();await rpc.disconnect();}
++});
+
+--- Submission13/tools/deploy-mainnet.mjs
++++ Submission14/tools/deploy-mainnet.mjs
+@@ -22,8 +22,13 @@ import {GENESIS} from './deploy-testnet.mjs';
+ 
+ const artifacts=JSON.parse(readFileSync(new URL('../artifacts/test-artifacts.private.json',import.meta.url),'utf8'));
+ const LOW128=(1n<<128n)-1n,PAYMENT_TOKEN_DELAY=2*86400,REPLACEMENT_GAS=1_000_000n,TIP_CEILING_TIMES=3n,TIP_CEILING_FLOOR=2_000_000_000n;
++// a bid a node refused as too low, in the words of geth, reth, Nethermind, Erigon and Besu (Swarm audit 8b5de2de finding 3)
++const bidTooLow=e=>e.code==='REPLACEMENT_UNDERPRICED'||/underpriced|insufficient gas price to replace|below .*minimum|fee too low|could not replace/i.test(String(e.message));
+ // a refused send can mean a bid is already held; a 502 or a rate limit says nothing about bids (Swarm audit 161d71af finding 5)
+-const mayHoldBid=e=>e.code==='REPLACEMENT_UNDERPRICED'||e.code==='TIMEOUT'||/already known|known transaction|underpriced/i.test(String(e.message));
++const mayHoldBid=e=>bidTooLow(e)||e.code==='TIMEOUT'||/already known|known transaction|already imported|same hash/i.test(String(e.message));
++// a node answered no to this transaction: it holds no such thing. Any other error can come after the node took it
++const refusedSend=e=>bidTooLow(e)||e.code==='NONCE_EXPIRED'||e.code==='INSUFFICIENT_FUNDS';
++const STEP_NAMES=Object.freeze(['deploy EmberEvoGenesis','setRevealURIs (not locked)','setRevealCommit','addPaymentToken(USDC, 1600 GOLD)','approvePaidPrice','transferOwnership(Safe)']);
+ const sha256=hex=>createHash('sha256').update(Buffer.from(hex.replace(/^0x/,''),'hex')).digest('hex');
+ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+ export const MAINNET=Object.freeze({
+@@ -43,6 +48,7 @@ export const MAINNET=Object.freeze({
+   initcodeSha256:'388bfd2effddf5feccc0591cadd5c961f89d3222793a26f82ee365937a39e3d2',
+   runtimeSha256:'5f6b7f0e5f4f9cc395cb291aa6cc82f03d5c6acb5a3455d18bb4c06490f67ff9',
+   abiSha256:'91a76770538dc4e0fc7b2e47d7fb316ff00e2a569569a92abf5fb4be1835f035',
++  extraTokenCountSlot:11,   // extraPaymentTokenCount in the storage layout of this build: a new build changes the hashes and this together
+   runtimeBytes:24427}),
+ });
+ export const localBuild=()=>artifacts[GENESIS];
+@@ -123,20 +129,32 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+   contract=ethers.getAddress(resume.contract);planNonce=resume.planNonce;
+  }else{nonce=await stableNonce();planNonce=nonce;contract=ethers.getCreateAddress({from:owner,nonce});}
+  const steps=[...(resume?.steps??[])],failed=[...(resume?.failed??[])];   // failed: transactions that reverted. Each spent a nonce and burned gas
+- const state=extra=>({deployer:owner,signer:signerAddress,revealCommit,contract,planNonce,steps,failed,...extra});
+- const record=(name,rc,hashes)=>{(rc.status===1?steps:failed).push({name,hash:rc.hash,hashes:[...hashes],gasUsed:rc.gasUsed.toString(),blockNumber:rc.blockNumber});};
+  let seed=resume?.pending??null;   // a transaction a stopped run left waiting: it may still land, and a replacement must outbid it
++ // waiting transactions of later steps, when a nonce under them came free and is filled first. The record keeps them until they are reached (Swarm audit 8b5de2de finding 4)
++ const later=[...(resume?.queued??[])];
++ if(!seed)seed=later.shift()??null;
++ const nextSeed=()=>{seed=later.shift()??null;};
++ const trimSeed=()=>{while(seed&&seed.nonce<nonce)nextSeed();};
++ const state=extra=>{
++  const queued=[...(seed?[seed]:[]),...later].filter(s=>s.hashes.length&&s.nonce>=nonce&&!(s.name===extra?.pending?.name&&s.nonce===extra.pending.nonce));
++  return {deployer:owner,signer:signerAddress,revealCommit,contract,planNonce,steps,failed,...(queued.length?{queued}:{}),...extra};
++ };
++ const record=(name,rc,hashes)=>{(rc.status===1?steps:failed).push({name,hash:rc.hash,hashes:[...hashes],gasUsed:rc.gasUsed.toString(),blockNumber:rc.blockNumber,blockHash:rc.blockHash});};
+  const feeText=f=>f?.maxFeePerGas==null?null:{maxFeePerGas:String(f.maxFeePerGas),maxPriorityFeePerGas:String(f.maxPriorityFeePerGas)};
++ const feeOf=f=>({maxFeePerGas:BigInt(f.maxFeePerGas),maxPriorityFeePerGas:BigInt(f.maxPriorityFeePerGas)});
+ 
+  const fees=async last=>{
+   const f=await provider.getFeeData();
+   if(f.maxFeePerGas==null)return {};
+-  const up=(v,prev)=>{const bumped=prev==null?0n:prev*125n/100n+1n;return v>bumped?v:bumped;};
++  const up=(v,prev,percent=125n)=>{const bumped=prev==null?0n:prev*percent/100n+1n;return v>bumped?v:bumped;};
+   const tip=f.maxPriorityFeePerGas??0n,bid={maxFeePerGas:up(f.maxFeePerGas,last?.maxFeePerGas),maxPriorityFeePerGas:up(tip,last?.maxPriorityFeePerGas)};
+   // the tip is paid in full: bids stop at a multiple of today's tip, also across resumes. A waiting transaction above it is only waited for
+   const ceiling=tip*TIP_CEILING_TIMES>TIP_CEILING_FLOOR?tip*TIP_CEILING_TIMES:TIP_CEILING_FLOOR;
+-  if(bid.maxPriorityFeePerGas>ceiling)throw Object.assign(Error('TIP_CEILING the next bid passes '+ceiling+' wei of tip: check the deployer on Etherscan and resume later'),{code:'TIP_CEILING'});
+-  return bid;
++  if(bid.maxPriorityFeePerGas<=ceiling)return bid;
++  // a node takes a replacement 10% above: the last bid is the ceiling itself, if that is enough (Swarm audit 8b5de2de finding 5)
++  if(up(0n,last?.maxPriorityFeePerGas,110n)>ceiling)throw Object.assign(Error('TIP_CEILING the next bid passes '+ceiling+' wei of tip: check the deployer on Etherscan and resume later'),{code:'TIP_CEILING'});
++  const cap=up(f.maxFeePerGas,last?.maxFeePerGas,110n);
++  return {maxFeePerGas:cap>ceiling?cap:ceiling,maxPriorityFeePerGas:ceiling};
+  };
+  const firstReceipt=async(hashes,ms)=>{
+   const end=Date.now()+ms;
+@@ -151,20 +169,21 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+   }
+   throw Error('RECEIPT_NOT_VISIBLE '+rc.hash);
+  };
+- // The receipt of a recorded transaction or of a replacement of it. null only when a node past its block answers and has none of
+- // them: a reorg took it out. A node that is behind or does not answer stops the run instead (Swarm audit 161d71af finding 2).
++ // The receipt of a recorded transaction or of a replacement of it. null only when a node shows, in one answer, another block at that
++ // height without any of them: a reorg took it out. Two requests can reach two nodes, so a missing receipt and a head past the block
++ // prove nothing. Anything else stops the run instead (Swarm audit 161d71af finding 2, 8b5de2de finding 1).
+  const recordedReceipt=async top=>{
+   const hashes=top.hashes??[top.hash];let empty=0;
+   for(let i=0;i<visibleTries;i++){
+-   const n=await provider.getBlockNumber().catch(()=>-1);let answered=n>=top.blockNumber;
+    for(const h of hashes){
+-    const r=await provider.getTransactionReceipt(h).catch(()=>{answered=false;return null;});
++    const r=await provider.getTransactionReceipt(h).catch(()=>null);
+     if(r)return r;
+    }
+-   empty=answered?empty+1:0;
++   const b=await provider.send('eth_getBlockByNumber',[ethers.toQuantity(top.blockNumber),true]).catch(()=>null);
++   empty=b&&b.hash!==top.blockHash&&!b.transactions.some(t=>hashes.includes(t.hash??t))?empty+1:0;
++   if(empty>=visibleReads)return null;
+    await sleep(pollMs);
+   }
+-  if(empty>=visibleReads)return null;
+   throw Error('RECEIPT_NOT_VISIBLE '+top.hash);
+  };
+  // A resume reads nothing before the chain shows what the record knows: its last transaction, then the one the stopped run left
+@@ -179,21 +198,34 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+    list.splice(list.indexOf(top),1);
+    if(rc)record(top.name,rc,top.hashes??[top.hash]);else{topLeft=true;log(top.name,'not on the chain any more: reading the chain instead of the record');}
+   }
+-  let floor=topLeft?0:seed?.nonce??0;   // a waiting transaction above a nonce that came free cannot land before that nonce is filled
+-  if(seed){
+-   let rc=seed.hashes.length?await firstReceipt(seed.hashes,pollMs*5):null;
+-   if(!rc&&seed.hashes.length&&await stableNonce()>seed.nonce)rc=await firstReceipt(seed.hashes,stepTimeoutMs);   // its nonce is spent: the receipt should come
+-   if(rc){await settled(rc);floor=seed.nonce+1;record(seed.name,rc,seed.hashes);seed=null;}
++  // only a landed transaction bounds the nonce. One still waiting may sit above a nonce that came free, in a record that no longer holds the step below it, and
++  // cannot land before that nonce is filled. A stale low read then sends at a spent nonce, which a node refuses (NONCE_MOVED) (Swarm audit 8b5de2de review)
++  let floor=0;
++  const open=[];
++  for(const s of [...(seed?[seed]:[]),...later]){
++   let rc=s.hashes.length?await firstReceipt(s.hashes,pollMs*5):null;
++   if(!rc&&s.hashes.length&&await stableNonce()>s.nonce)rc=await firstReceipt(s.hashes,stepTimeoutMs);   // its nonce is spent: the receipt should come
++   if(rc){await settled(rc);floor=Math.max(floor,s.nonce+1);record(s.name,rc,s.hashes);}else open.push(s);
+   }
++  seed=open.shift()??null;later.splice(0,later.length,...open);
+   nonce=Math.max(await stableNonce(),floor,planNonce+steps.length+failed.length);
+-  if(seed&&nonce>seed.nonce)seed=null;
++  trimSeed();
+  }
+  // a gate saw the waiting transaction land after the first look above: record it and move past its nonce (Swarm audit 161d71af finding 4)
+  const seedLanded=async()=>{
+   const rc=seed.hashes.length?await firstReceipt(seed.hashes,stepTimeoutMs):null;
+   if(rc){await settled(rc);record(seed.name,rc,seed.hashes);nonce=Math.max(nonce,seed.nonce+1);}
+-  else nonce=Math.max(await stableNonce(),planNonce+steps.length+failed.length);   // it landed under another hash, at a nonce only the chain knows
+-  seed=null;
++  else{
++   // it landed under another hash, normally at this nonce. A node can only read the count too low, so the highest read counts and what the
++   // run knows stays. A count that stays at this nonce: the step landed below it and a resend no node holds took the record here, so it is free (Swarm audit 8b5de2de finding 6)
++   let n=nonce;
++   for(let i=0;i<visibleTries&&n<=seed.nonce;i++){
++    n=Math.max(n,await provider.getTransactionCount(owner,'latest').catch(()=>0));
++    if(n<=seed.nonce)await sleep(pollMs);
++   }
++   nonce=Math.max(n,planNonce+steps.length+failed.length);
++  }
++  nextSeed();
+   checkpoint(state());
+  };
+  // a node that has not seen the contract estimates a plain transfer: the floor keeps such an estimate from running out of gas
+@@ -204,22 +236,37 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+   // knownLimit: the gas limit the step last went out on (Swarm audit 161d71af finding 9)
+   let hashes=[],last=null,placed=null,lastError=null,knownLimit=null;
+   const waiting=()=>({pending:{name,nonce,hashes,fee:feeText(placed),gasLimit:knownLimit===null?null:knownLimit.toString()}});
+-  // the waiting transaction is another step: this one's read was stale, and sending it would replace that transaction
+-  if(seed?.hashes.length&&seed.nonce===nonce&&seed.name!==name)throw Error('RESUME_OUT_OF_ORDER '+name+' at the nonce of '+seed.name+' ('+seed.hashes.join(',')+'): run the resume again');
+-  if(seed&&seed.name===name&&seed.nonce===nonce){hashes=[...seed.hashes];if(seed.gasLimit)knownLimit=BigInt(seed.gasLimit);if(seed.fee)last=placed={maxFeePerGas:BigInt(seed.fee.maxFeePerGas),maxPriorityFeePerGas:BigInt(seed.fee.maxPriorityFeePerGas)};}
++  // A waiting transaction of another step at this nonce: normally this step's read was stale, and sending it would replace that transaction. No
++  // node holding it, or this step's own last try having reverted, is the real thing: at most one of them lands, and a held one must be outbid
++  const meetSeed=async()=>{
++   trimSeed();
++   if(!seed?.hashes.length||seed.nonce!==nonce||seed.name===name)return;
++   if(!(await Promise.all(seed.hashes.map(h=>provider.getTransaction(h).catch(()=>true)))).some(Boolean))return;
++   if(!failed.some(f=>f.name===name))throw Error('RESUME_OUT_OF_ORDER '+name+' at the nonce of '+seed.name+' ('+seed.hashes.join(',')+'): run the resume again');
++   if(seed.fee)last=feeOf(seed.fee);
++  };
++  await meetSeed();
++  if(seed&&seed.name===name&&seed.nonce===nonce){hashes=[...seed.hashes];if(seed.gasLimit)knownLimit=BigInt(seed.gasLimit);if(seed.fee)last=placed=feeOf(seed.fee);}
+   for(let a=0;a<attempts;a++){
+-   let sent=false,fee=null;
++   let sent=false,fee=null,own=null,fresh=false;
+    try{
+     const bid=await fees(last);
+     // a node may estimate on top of the waiting transaction, and a step cannot run twice. A replacement holds the same nonce, so
+     // at most one of them lands: it goes out on the limit the step already used, or a fixed one a record without it fits in
+-    const req=await request(),limit=await gasLimit(req).catch(e=>{if(hashes.length&&req.to)return knownLimit??REPLACEMENT_GAS;throw e;});
++    const req=await request(),limit=await gasLimit(req).catch(e=>{if(placed&&req.to)return knownLimit??REPLACEMENT_GAS;throw e;});
+     fee=bid;
+-    const tx=await deployer.sendTransaction({...req,gasLimit:limit,nonce,...fee});
+-    hashes.push(tx.hash);knownLimit=limit;last=placed=fee;sent=true;log(name,tx.hash);
++    // signed here, so the record holds the hash before a reply can get lost on the way back (Swarm audit 8b5de2de finding 2)
++    const signed=await deployer.signTransaction(await deployer.populateTransaction({...req,gasLimit:limit,nonce,...fee}));
++    own=ethers.Transaction.from(signed).hash;fresh=!hashes.includes(own);
++    if(fresh)hashes.push(own);
++    knownLimit=limit;
++    checkpoint(state(waiting()));
++    await provider.broadcastTransaction(signed);
++    last=placed=fee;sent=true;lastError=null;log(name,own);
+     checkpoint(state(waiting()));
+    }catch(e){
+     lastError=e;
++    if(fresh&&refusedSend(e))hashes.splice(hashes.indexOf(own),1);
+     if(e.code==='TIP_CEILING'){
+      // no higher bid: what remains is to wait for the one placed. A transaction no node holds any more has no bid to beat
+      const held=(await Promise.all(hashes.map(h=>provider.getTransaction(h).catch(()=>true)))).some(Boolean);
+@@ -234,13 +281,13 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+    await settled(rc);nonce++;
+    record(name,rc,hashes);checkpoint(state());
+    if(rc.status!==1){
+-    if(revertRetries-->0){hashes=[];last=placed=null;continue;}
++    if(revertRetries-->0){hashes=[];last=placed=null;await meetSeed();continue;}
+     throw Error('TX_FAILED '+name);
+    }
+    return rc;
+   }
+   checkpoint(state(waiting()));
+-  throw lastError&&!hashes.length?lastError:Error('STEP_STUCK '+name+(lastError?.code==='TIP_CEILING'?': '+lastError.message:''));
++  throw lastError&&!hashes.length?lastError:Error('STEP_STUCK '+name+(lastError?.code==='TIP_CEILING'?': '+lastError.message:lastError?.code?': '+lastError.code+(lastError.error?.message?' ('+lastError.error.message+')':''):''));
+  }
+  // a block 2 below the head, read from one head and twice the same hash (a lagging or forked node cannot name it)
+  async function recentBlock(){
+@@ -255,6 +302,7 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+  // a step the record shows landed does not go out again. A lagging node answers with an old value, which can only say "not done":
+  // on a resume every read must say so first (Swarm audit 358f7f40 finding 2). The read-back below has the last word on the values.
+  const notDone=async(name,isDone)=>{
++  trimSeed();
+   if(stepBlock(name)!==undefined)return false;
+   for(let i=0;i<(resume?visibleReads:1);i++){
+    if(i)await sleep(pollMs);
+@@ -274,7 +322,7 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+  }
+  // an RPC error is not "no code", and on a resume one empty answer may be a lagging node
+  const codeAbsent=async()=>{for(let i=0;i<(resume?10:1);i++){if(await retry(()=>provider.getCode(contract))!=='0x')return false;if(resume)await sleep(pollMs);}return true;};
+- checkpoint(state(seed?{pending:seed}:{}));
++ checkpoint(state(seed?.nonce===nonce?{pending:seed}:{}));   // above the nonce it is queued: a stop here must not make the next resume start from its nonce
+  if(await codeAbsent()){
+   if(nonce!==planNonce)throw Error('PLANNED_NONCE_USED no code at '+contract+' but the deployer has sent transactions since the plan. Open the deployer on Etherscan: if the contract exists, wait and resume; if the deploy reverted or another transaction took its nonce, archive this partial record by hand and start again');
+   const rc=await send('deploy EmberEvoGenesis',()=>factory.getDeployTransaction(...genesisArgs));
+@@ -304,17 +352,21 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+  // read back everything the next steps (Safe, signer Worker, World GOLD book, Etherscan) depend on
+  const deployBlock=stepBlock('deploy EmberEvoGenesis')??Number(await retry(()=>genesis.startBlock()));
+  const addBlock=stepBlock('addPaymentToken(USDC, 1600 GOLD)');
+- const usdcUsableAt=addBlock!==undefined?(await retry(async()=>{const b=await provider.getBlock(addBlock);if(!b)throw Error('BLOCK_NOT_VISIBLE '+addBlock);return b;})).timestamp+PAYMENT_TOKEN_DELAY:null;
++ const blockTime=n=>retry(async()=>{const b=await provider.getBlock(n);if(!b)throw Error('BLOCK_NOT_VISIBLE '+n);return b.timestamp;});
++ const usdcUsableAt=addBlock!==undefined?await blockTime(addBlock)+PAYMENT_TOKEN_DELAY:null;
++ // a step the chain shows and the record lost has no block to read: usableAt must still fall between the deploy and now (Swarm audit 8b5de2de finding 7)
++ const usableFrom=usdcUsableAt===null?await blockTime(deployBlock)+PAYMENT_TOKEN_DELAY:null;
+  const read=f=>retry(()=>genesis[f](),5);   // one read a lagging node cannot answer must not cost the whole pass below
+  const readToken=async t=>{const p=await retry(()=>genesis.paymentTokens(t),5);return {token:ethers.getAddress(t),amount:(p&LOW128).toString(),goldCost:((p>>128n)&((1n<<88n)-1n)).toString(),usableAt:Number(p>>216n)};};
+  const expect={name:cfg.name,symbol:cfg.symbol,owner,pendingOwner:ethers.getAddress(cfg.safe),recipient:ethers.getAddress(cfg.safe),signer:signerAddress,
+   paidCost:cfg.paidCost.toString(),goldCost:cfg.goldCost.toString(),mintPaused:true,paidPriceApproved:true,revealURIsLocked:false,revealCommit,
+   pendingURI:cfg.pendingURI,metadataBase:cfg.metadataBase,maxSupply:'1688',snapshotConfigured:false,domainVersion:'7',domainName:'EmberEvoGenesisCandidate',
+   domainChainId:String(chainId),domainContract:contract,signerEpoch:'1',startBlock:String(deployBlock),runtimeBytes:String(cfg.reviewed.runtimeBytes)};
+- let got,paymentTokens,code,codeCheck,mismatch,readError;
++ let got,paymentTokens,code,codeCheck,mismatch,readError,now;
+  for(let i=0;i<10;i++){   // a mismatch from a lagging node clears; a real one stays and is returned
+   try{
+    const domain=await read('eip712Domain');
++   if(usableFrom!==null)now=await blockTime('latest');
+    paymentTokens=[await readToken(cfg.imdUSD),await readToken(cfg.usdc)];code=await retry(()=>provider.getCode(contract),5);codeCheck=runtimeMatches(build.runtimeBytecode,code);
+    got={name:await read('name'),symbol:await read('symbol'),owner:await read('owner'),pendingOwner:await read('pendingOwner'),
+     recipient:await read('paymentRecipient'),signer:await read('appearanceSigner'),paidCost:(await read('paidCost')).toString(),goldCost:(await read('paidGoldCost')).toString(),
+@@ -328,6 +380,7 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+   if(paymentTokens[0].amount!==cfg.paidCost.toString()||paymentTokens[0].goldCost!==cfg.goldCost.toString())mismatch.push('paymentTokens(imdUSD)');
+   if(paymentTokens[1].amount!==(cfg.paidCost/10n**12n).toString()||paymentTokens[1].goldCost!==cfg.usdcGoldCost.toString())mismatch.push('paymentTokens(USDC)');
+   if(usdcUsableAt!==null&&paymentTokens[1].usableAt!==usdcUsableAt)mismatch.push('paymentTokens(USDC).usableAt');
++  if(usableFrom!==null&&(paymentTokens[1].usableAt<usableFrom||paymentTokens[1].usableAt>now+PAYMENT_TOKEN_DELAY))mismatch.push('paymentTokens(USDC).usableAt');
+   if(!mismatch.length)break;
+   await sleep(pollMs);
+  }
+@@ -339,6 +392,8 @@ export async function deployMainnet({deployer,revealSigner,revealCommit,cfg=MAIN
+   domainVersion:got.domainVersion,maxSupply:got.maxSupply,mintPaused:got.mintPaused,snapshotConfigured:false,codeHash,runtimeBytes:(code.length-2)/2,
+   reviewedBuild:{initcodeSha256:cfg.reviewed.initcodeSha256,runtimeSha256:cfg.reviewed.runtimeSha256,immutableRuns:codeCheck.immutableRuns},
+   readBackMismatch:mismatch,steps,failed,totalGas:[...steps,...failed].reduce((a,s)=>a+BigInt(s.gasUsed),0n).toString(),
++  // on the chain, by the gates, but with no hash in the record: their gas is not in totalGas
++  notInRecord:STEP_NAMES.filter(n=>stepBlock(n)===undefined),
+   etherscan:{contractName:GENESIS,compiler:'v0.8.38+commit.1835d247',constructorArgsHex:factory.interface.encodeDeploy(genesisArgs).slice(2)}};
+ }
+ 
+@@ -391,7 +446,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+   let deployer,revealSigner,revealCommit,cfg=MAINNET,resume=null;
+   if(dry){
+    const rpc=await createTestProvider(1),provider=new ethers.BrowserProvider(rpc,undefined,{cacheTimeout:-1});
+-   deployer=await provider.getSigner(0);close=()=>rpc.disconnect();revealSigner=testAuthority(1);
++   deployer=testAuthority(0).connect(provider);close=()=>rpc.disconnect();revealSigner=testAuthority(1);
+    revealCommit=revealChain(ethers.keccak256(ethers.toUtf8Bytes('ember-evo-genesis MAINNET DRY RUN reveal chain'))).anchor;
+    // local fixtures (the Sepolia test tokens refuse chainId 1): 18 decimals for imdUSD, 6 for USDC
+    const dep=async(k,...a)=>{const c=await new ethers.ContractFactory(artifacts[k].abi,artifacts[k].bytecode,deployer).deploy(await deployer.getAddress(),...a);await c.waitForDeployment();return c.getAddress();};
+@@ -418,7 +473,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+    writeAtomic(file,JSON.stringify({...d,followUp:{goldBookRegistry:mainnetGoldBookEntry(d),
+     workerVars:{CHAIN_ID:String(d.chainId),CONTRACT_ADDRESS:d.contract,METADATA_BASE:d.metadataBase,PAYMENT_TOKENS:d.paymentTokens.map(t=>t.token).join(',')}}},null,1));
+    if(partialFile&&!d.readBackMismatch.length)rmSync(partialFile,{force:true});   // a mismatch stays open: a resume reads it back again
+-   console.log(JSON.stringify({contract:d.contract,owner:d.owner,pendingOwner:d.pendingOwner,paymentTokens:d.paymentTokens,readBackMismatch:d.readBackMismatch,totalGas:d.totalGas,file},null,1));
++   console.log(JSON.stringify({contract:d.contract,owner:d.owner,pendingOwner:d.pendingOwner,paymentTokens:d.paymentTokens,readBackMismatch:d.readBackMismatch,totalGas:d.totalGas,notInRecord:d.notInRecord,file},null,1));
+    if(d.readBackMismatch.length)process.exitCode=2;
+   }
+  }catch(e){reportFailure(e,{lastStep,partialRecord:partialFile});}
+
+--- Submission13/tools/safe-batch.mjs
++++ Submission14/tools/safe-batch.mjs
+@@ -20,6 +20,7 @@ import {createInterface} from 'node:readline/promises';
+ import {ethers} from './runtime.mjs';
+ import {reportFailure} from './tool-errors.mjs';
+ import {snapshotTree} from '../../signer/free-approval.mjs';
++import {MAINNET,localBuild,runtimeMatches,verifyBuild} from './deploy-mainnet.mjs';
+ 
+ const I=new ethers.Interface(['function acceptOwnership()','function setRevealURIs(string pending,string base,bool lock)',
+  'function configureSnapshot(bytes32 root,uint256 eligible,uint256 takenAt,uint256 start)','function setMintPaused(bool paused)']);
+@@ -29,9 +30,9 @@ const READ=['function owner() view returns (address)','function pendingOwner() v
+  'function skinCap(uint256) view returns (uint256)','function paidPriceApproved() view returns (bool)','function tokenURIsLocked() view returns (bool)','function supplyLocked() view returns (bool)'];
+ const SKIN_CAPS='1068,218,218,68,68,48';
+ const DAY=86400,MAX_UINT40=1099511627775;
+-// extraPaymentTokenCount is private: its slot in the storage layout of the reviewed build. A public RPC refuses logs older than about
+-// 10,000 blocks but serves this at the head (Swarm audit 161d71af finding 1). A test pins it against the real contract.
+-const EXTRA_TOKEN_COUNT_SLOT=11;
++// extraPaymentTokenCount is private: its slot in the storage layout of the reviewed build, pinned beside that build's hashes. A public RPC
++// refuses logs older than about 10,000 blocks but serves this at the head (Swarm audit 161d71af finding 1). A test pins it against the real contract.
++const EXTRA_TOKEN_COUNT_SLOT=MAINNET.reviewed.extraTokenCountSlot;
+ export const MAX_OPENING_AHEAD=60*DAY;
+ const WORKER_LIST=fileURLToPath(new URL('../../signer/snapshot-wallets.json',import.meta.url));
+ const PUBLIC_RPC='https://ethereum-rpc.publicnode.com';
+@@ -103,6 +104,13 @@ export async function chainState(provider,d,head){
+  head??=await stableHead(provider,recordBlock(d));
+  const g=new ethers.Contract(d.contract,READ,provider),q=(fn,...a)=>steady(()=>g[fn](...a,{blockTag:head}));
+  await checkChain(provider,d);
++ // the slot means something only in the build the record names (Swarm audit 8b5de2de finding 8). No code at a block a node should have: a node to ask again
++ const code=await steady(async()=>{const c=await provider.getCode(d.contract,head);if(c==='0x')throw Error('CODE_NOT_VISIBLE '+d.contract);return c;});
++ if(ethers.keccak256(code)!==d.codeHash)throw Error('CODE_NOT_RECORDED_BUILD the code at '+d.contract+' is not the code the record names');
++ if(d.chainId===1){
++  verifyBuild(localBuild(),MAINNET);   // a local recompile is named as that, not as the chain's code being wrong
++  if(!runtimeMatches(localBuild().runtimeBytecode,code).ok)throw Error('CODE_NOT_RECORDED_BUILD the code at '+d.contract+' is not the reviewed build');
++ }
+  const [owner,pendingOwner,snapshotConfigured,mintPaused,revealURIsLocked,pendingURI,revealBaseURI,tokenURIsLocked,supplyLocked]=await Promise.all(['owner','pendingOwner','snapshotConfigured','mintPaused','revealURIsLocked','pendingURI','revealBaseURI','tokenURIsLocked','supplyLocked'].map(fn=>q(fn)));
+  const [revealCommit,signer,pendingSigner,maxSupply,paidPriceApproved,...caps]=await Promise.all([...['revealCommit','appearanceSigner','pendingAppearanceSigner','maxSupply','paidPriceApproved'].map(fn=>q(fn)),...[0,1,2,3,4,5].map(i=>q('skinCap',i))]);
+  const extraTokens=BigInt(await steady(()=>provider.getStorage(d.contract,EXTRA_TOKEN_COUNT_SLOT,head))).toString();
