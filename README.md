@@ -2,12 +2,13 @@
 
 Ember Evo Genesis is an **unofficial, community-made** NFT collection (1,688 3D "Pepe" characters).
 
-**Current: [Submission14](Submission14/AUDIT_README.md): remediation of audit 8b5de2de on the deployment tools for Ethereum
-mainnet, submitted for review before the deployment (2026-11-04).** The contract is the build of Submission13, byte for byte. The tools
-`tools/deploy-mainnet.mjs` and `tools/safe-batch.mjs` changed. Not deployed on any chain;
-`Submission14/build/standard-input.json` reproduces it (solc 0.8.38, runtime 24,427 bytes). The differences are in
-[Submission14/build/](Submission14/build/).
+**Current: [Submission15](Submission15/AUDIT_README.md): remediation of audit 56694dc1 on the deployment tools for Ethereum
+mainnet, published without a further review request (2026-11-04).** The contract is the build of Submission14, byte for byte. The tool
+`tools/deploy-mainnet.mjs` changed. Not deployed on any chain;
+`Submission15/build/standard-input.json` reproduces it (solc 0.8.38, runtime 24,427 bytes). The differences are in
+[Submission15/build/](Submission15/build/).
 
+[Submission14](Submission14/AUDIT_README.md) (remediation of audit 8b5de2de on the deployment tools; audit 56694dc1 handled in Submission15),
 [Submission13](Submission13/AUDIT_README.md) (remediation of audit 161d71af on the deployment tools; audit 8b5de2de handled in Submission14),
 [Submission12](Submission12/AUDIT_README.md) (remediation of audit 358f7f40 on the deployment tools; audit 161d71af handled in Submission13),
 [Submission11](Submission11/AUDIT_README.md) (remediation of audit 90ae2f92 on the mainnet build and tools; audit 358f7f40 handled in Submission12),
